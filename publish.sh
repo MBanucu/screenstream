@@ -18,6 +18,9 @@
 #   CENTRAL_PASSWORD   portal user token password   /  --status; if unset, they
 #                      are read from ~/.m2/settings.xml, server id "central"
 #   SETTINGS           a different settings.xml to read that server from
+#   GRADLE_PUBLISH     take the artifacts from the Gradle build's repository layout
+#                      instead of build.sh, which is the only route that includes
+#                      the .module file
 #
 # What Central checks, and where it comes from:
 #   .aar, .pom, -sources.jar, -javadoc.jar   build.sh
@@ -112,7 +115,27 @@ for tool in gpg md5sum sha1sum sha256sum sha512sum python3; do
 done
 
 # --- the artifacts -------------------------------------------------------------
-bash "$here/build.sh"
+# build.sh writes four files. Gradle's repository layout writes five, the fifth
+# being the .module a Gradle consumer reads instead of inferring the artifact from
+# the POM's <packaging>. GRADLE_PUBLISH=1 takes the Gradle route.
+files_in=()
+if [ -n "${GRADLE_PUBLISH:-}" ]; then
+    echo "== $artifact_id $version: gradle =="
+    bash "$here/gradlew" --no-daemon --console=plain >/dev/null \
+        publishAllPublicationsToOutRepoRepository -Pversion="$version"
+    src=$here/build/m2repo/${group//.//}/$artifact_id/$version
+    for name in "$artifact_id-$version.pom" "$artifact_id-$version.aar" \
+            "$artifact_id-$version.module" \
+            "$artifact_id-$version-sources.jar" "$artifact_id-$version-javadoc.jar"; do
+        files_in+=("$src/$name")
+    done
+else
+    bash "$here/build.sh"
+    for name in "$artifact_id-$version.pom" "$artifact_id-$version.aar" \
+            "$artifact_id-$version-sources.jar" "$artifact_id-$version-javadoc.jar"; do
+        files_in+=("$out/$name")
+    done
+fi
 
 # --- sign, checksum, lay out as a repository -----------------------------------
 # Central's validation reads this tree; the zip's first entry is io/, not a
@@ -130,10 +153,9 @@ if [ -n "${PGP_PASSPHRASE:-}" ]; then
     sign+=(--batch --pinentry-mode loopback --passphrase-fd 3)
 fi
 created=0
-for name in "$artifact_id-$version.pom" "$artifact_id-$version.aar" \
-        "$artifact_id-$version-sources.jar" "$artifact_id-$version-javadoc.jar"; do
-    [ -f "$out/$name" ] || { echo "build.sh did not write $out/$name" >&2; exit 1; }
-    cp "$out/$name" "$dir/$name"
+for file in "${files_in[@]}"; do
+    [ -f "$file" ] || { echo "missing artifact: $file" >&2; exit 1; }
+    cp "$file" "$dir/$(basename "$file")"
     created=$((created + 1))
 done
 

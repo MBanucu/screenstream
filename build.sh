@@ -25,7 +25,7 @@ set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
 mode=${1:-library}
-version=${VERSION:-0.1.0}
+version=${VERSION:-0.2.0}
 sources=$here/src/main/java
 
 sdk=""

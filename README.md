@@ -170,15 +170,16 @@ consumer adds **no declarations of its own** — the permissions, the service an
 the activity all come with the dependency.
 
 ```bash
-bash build.sh    # out/screenstream-0.1.0.aar (+ .jar, sources, javadoc, .pom)
+bash build.sh    # out/screenstream-0.2.0.aar (+ .jar, sources, javadoc, .pom)
 ```
 
 ```kotlin
 // build.gradle.kts of the consuming app
 android { ... }
 dependencies {
-    implementation(files("libs/screenstream-0.1.0.aar"))
-    // or from Maven Central: implementation("io.github.mbanucu:screenstream:0.1.0@aar")
+    implementation(files("libs/screenstream-0.2.0.aar"))
+    // or from Maven Central, which resolves the AAR on its own since 0.2.0:
+    //   implementation("io.github.mbanucu:screenstream:0.2.0")
 }
 ```
 
@@ -266,9 +267,9 @@ first release run stops at the step that checks for them.
 
 What Gradle adds is what a publication wants rather than what a build needs:
 module metadata (`.module`, which is how a Gradle consumer resolves the AAR without
-an explicit `@aar` — the 0.1.0 POM on Central has none, which is why that
-coordinate needs one), `publishToMavenLocal` for testing a consumer, and a project
-an IDE or JitPack can open. It costs the first run about five minutes in
+an explicit `@aar` — 0.1.0 has none, which is why that coordinate needs one, and
+0.2.0 was published from this build to have it), `publishToMavenLocal` for testing
+a consumer, and a project an IDE or JitPack can open. It costs the first run about five minutes in
 downloads; `build.sh` remains the path with no downloads at all. Two things it
 needs on this device are already in place: `android.aapt2FromMavenOverride` in
 `~/.gradle/gradle.properties` points AGP at Termux's own aapt2, and
@@ -287,16 +288,19 @@ builds, signs and assembles it. One version is 40 files — the AAR, POM, source
 jar and javadoc jar, each with a `.asc` and four checksums — 163 KB per version.
 
 ```bash
-bash publish.sh            # build, sign, checksum: out/screenstream-0.1.0-bundle.zip
+bash publish.sh            # build, sign, checksum: out/screenstream-<version>-bundle.zip
 bash publish.sh --upload   # ... and upload it, with the portal's user token
+GRADLE_PUBLISH=1 bash publish.sh --upload   # same, with Gradle's artifacts (.module)
 bash publish.sh --status <deploymentId>   # VALIDATED, PUBLISHING, PUBLISHED
 bash publish.sh --publish <deploymentId>  # release a validated USER_MANAGED one
 ```
 
-0.1.0 went out on 2026-11-22 that way (deployment `607463de`), and Central had it
-about four minutes later: the POM, AAR, sources and javadoc answered 200 at
-`repo1.maven.org/maven2/io/github/mbanucu/screenstream/0.1.0/`, and the signature
-on the published POM verifies against the key below.
+0.1.0 went out on 2026-11-22 that way (deployment `607463de`) from `build.sh`, and
+Central had it about four minutes later. 0.2.0 is the same library published from
+the Gradle layout instead, so the bundle carries the `.module` as a fifth artifact:
+`GRADLE_PUBLISH=1 VERSION=0.2.0 bash publish.sh --upload`, which runs
+`publishAllPublicationsToOutRepoRepository` and signs what Gradle wrote. Both
+releases verify against the key below; 0.2.0 does not change the API.
 
 The token is read from `CENTRAL_USERNAME`/`CENTRAL_PASSWORD` if they are set, and
 otherwise from the `central` server in `~/.m2/settings.xml` — the same place a

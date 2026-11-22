@@ -1,6 +1,9 @@
 // The Gradle view of this library. There are no resources and no dependencies:
 // everything in it is android.jar and java.*. The manifest lives at the repository
 // root (build.sh copies it into the AAR), so it is pointed at rather than moved.
+import org.gradle.api.tasks.javadoc.Javadoc
+import org.gradle.external.javadoc.StandardJavadocDocletOptions
+
 plugins {
     // 9.x is the line that runs on Gradle 9.6+: AGP 8.x uses a Gradle internal API
     // that was removed there, and Termux packages Gradle 9.9.2.
@@ -29,12 +32,27 @@ android {
             withJavadocJar()
         }
     }
+
+    // The library is the AAR and nothing else; javadoc over android.* types would
+    // otherwise fail the build on doclint warnings about them.
+    tasks.withType<Javadoc>().configureEach {
+        (options as StandardJavadocDocletOptions).addBooleanOption("Xdoclint:none", true)
+    }
 }
 
 group = "io.github.mbanucu"
-version = providers.gradleProperty("version").getOrElse("0.1.0")
+version = providers.gradleProperty("version").getOrElse("0.2.0")
 
 publishing {
+    // A file repository, so the layout Gradle would publish to Maven Central can be
+    // inspected - and signed and bundled by publish.sh - without uploading.
+    repositories {
+        maven {
+            name = "outRepo"
+            url = uri(layout.buildDirectory.dir("m2repo"))
+        }
+    }
+
     publications {
         create<MavenPublication>("release") {
             afterEvaluate { from(components["release"]) }
