@@ -1,0 +1,654 @@
+package io.github.mbanucu.screenstream;
+
+import android.app.Activity;
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.Service;
+import android.content.Context;
+import android.content.Intent;
+import android.graphics.PixelFormat;
+import android.hardware.display.DisplayManager;
+import android.hardware.display.VirtualDisplay;
+import android.media.Image;
+import android.media.ImageReader;
+import android.media.projection.MediaProjection;
+import android.media.projection.MediaProjectionManager;
+import android.os.Build;
+import android.os.Handler;
+import android.os.HandlerThread;
+import android.os.IBinder;
+import android.os.SystemClock;
+import android.util.DisplayMetrics;
+import android.util.Log;
+
+import java.io.File;
+import java.io.IOException;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.nio.ByteBuffer;
+import java.nio.channels.SelectionKey;
+import java.nio.channels.Selector;
+import java.nio.channels.ServerSocketChannel;
+import java.nio.channels.SocketChannel;
+import java.util.ArrayDeque;
+import java.util.List;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicInteger;
+
+/**
+ * The phone's screen, as a raw stream that anything on the phone - or anything
+ * holding adb - can attach to.
+ *
+ * <p>This is the source, not a recording: images come from the compositor as
+ * RGBA_8888, straight out of an {@link ImageReader}, and go onto the wire without
+ * an encoder or a container. Nothing is remuxed and nothing is keyframed, so a
+ * consumer gets the frame the screen showed, not a picture of it.
+ *
+ * <p>Three properties are deliberate:
+ *
+ * <ul>
+ *   <li><b>Raw.</b> Each frame is the display's pixels at its own row stride:
+ *       {@code stride * height} bytes of RGBA, no compression, no timestamps
+ *       baked into a codec's bitstream.</li>
+ *   <li><b>VFR, only when the screen changes.</b> The compositor hands frames
+ *       over at the display's rate whether or not anything moved. Every frame is
+ *       compared with the one before it on a sample grid, and only the ones that
+ *       differ are numbered and sent: a still screen costs nothing, a blinking
+ *       caret costs two frames. This is the rule {@code screenrecord} applies to
+ *       its video, so a gap between two frame numbers is idle time and not a lost
+ *       frame.</li>
+ *   <li><b>Timed on the device.</b> {@link Image#getTimestamp()} is the
+ *       presentation time in nanoseconds on the device's elapsed clock, the clock
+ *       {@code screenrecord}'s metadata track and this stream's own frame numbers
+ *       are comparable with.</li>
+ * </ul>
+ *
+ * <h2>Attaching</h2>
+ *
+ * <p>The source listens on {@code 127.0.0.1:7100}. An app connects to it
+ * directly; adb reaches the same port through a forward, which is what makes the
+ * stream visible on the other end of the cable:
+ *
+ * <pre>
+ * adb forward tcp:7100 tcp:7100
+ * python3 test/stream.py --frames 3
+ * </pre>
+ *
+ * <p>Every frame starts with a 36-byte big-endian header, then its pixels:
+ *
+ * <pre>
+ *   magic "RAW1"   4 bytes
+ *   width          u32
+ *   height         u32
+ *   row stride     u32   bytes per row in the payload, padding included
+ *   format         u32   1 = RGBA_8888, 4 bytes per pixel
+ *   frame number   u64   changed frames since the capture began
+ *   timestamp      u64   nanoseconds, the device's elapsed clock
+ * </pre>
+ *
+ * <p>An app in the same process does not need the socket: {@link #subscribe}
+ * hands it every changed frame, shared with the socket consumers, so it costs no
+ * copy and no connection.
+ *
+ * <h2>Using it from another project</h2>
+ *
+ * <p>Two things have to happen outside this class, both of them an app's own
+ * business: someone grants the capture, and the phone's app-op is left alone. The
+ * grant is a {@link MediaProjection} token, which only the system dialog issues;
+ * {@link ScreenStreamActivity} asks for it, and {@link #setDialogClicker} is how
+ * something standing in for a person - an accessibility service, say - accepts
+ * the dialog. The activity is started by component:
+ *
+ * <pre>
+ * adb shell am start -n your.package/io.github.mbanucu.screenstream.ScreenStreamActivity
+ * adb shell am start -n your.package/io.github.mbanucu.screenstream.ScreenStreamActivity \
+ *     --ez stop true
+ * </pre>
+ *
+ * <p>What the service is doing is written to {@link #statusFile} in the app's own
+ * external files directory, so it can be read over adb while the accessibility
+ * service is off.
+ */
+public final class ScreenStream extends Service {
+
+    /** Every consumer uses this port, so a forward is all adb needs. */
+    public static final int PORT = 7100;
+    public static final String ACTION_START = "io.github.mbanucu.screenstream.START";
+    public static final String ACTION_STOP = "io.github.mbanucu.screenstream.STOP";
+    public static final String EXTRA_RESULT = "result";
+    public static final String EXTRA_SCALE = "scale";
+    /** The state this service writes, in the app's external files directory. */
+    public static final String STATUS_FILE = "screenstream.txt";
+
+    private static final String TAG = "ScreenStream";
+    /** Three frames in flight at the largest size this phone can produce. */
+    private static final int POOL = 3;
+    /** How long one frame may take to reach a consumer before it is cut off. */
+    private static final long WRITE_DEADLINE_MS = 2000;
+    /** Sample grid for "did the screen change": a caret is far bigger than this. */
+    private static final int CHANGE_STEP = 8;
+    private static final int HEADER_BYTES = 4 + 4 * 4 + 8 * 2;
+
+    private MediaProjection projection;
+    private VirtualDisplay display;
+    private ImageReader reader;
+    private HandlerThread thread;
+    private ServerSocketChannel server;
+    private int width, height, scale = 1;
+
+    private final List<Client> clients = new CopyOnWriteArrayList<>();
+    private static final List<Tap> taps = new CopyOnWriteArrayList<>();
+    private static final ArrayDeque<byte[]> pool = new ArrayDeque<>();
+    private static int bufferSize;
+    private static int allocated;
+    /** True while a capture is running in this process, so a tap knows to wait. */
+    private static volatile boolean live;
+    private static long frameNumber;
+    private static volatile Runnable dialogClicker;
+    private long previousSignature;
+    private long looked, changed, skipped, sent;
+    private long lastStatus;
+
+    @Override
+    public int onStartCommand(Intent intent, int flags, int startId) {
+        String action = intent == null ? null : intent.getAction();
+        if (ACTION_STOP.equals(action)) {
+            stopSelf();
+            return START_NOT_STICKY;
+        }
+        if (ACTION_START.equals(action) && intent.getParcelableExtra(EXTRA_RESULT) != null) {
+            startForeground(1, notification());
+            begin(intent.getParcelableExtra(EXTRA_RESULT), intent.getIntExtra(EXTRA_SCALE, 1));
+            return START_STICKY;
+        }
+        return START_NOT_STICKY;
+    }
+
+    /** Starts a capture with a token a {@link MediaProjectionManager} handed out. */
+    public static void start(Context context, Intent projection, int scale) {
+        Intent service = new Intent(context, ScreenStream.class)
+                .setAction(ACTION_START)
+                .putExtra(EXTRA_RESULT, projection)
+                .putExtra(EXTRA_SCALE, Math.max(1, scale));
+        if (Build.VERSION.SDK_INT >= 26) {
+            context.startForegroundService(service);
+        } else {
+            context.startService(service);
+        }
+    }
+
+    /** Ends the capture; the notification and the port go with it. */
+    public static void stop(Context context) {
+        context.stopService(new Intent(context, ScreenStream.class));
+    }
+
+    /**
+     * Something that can accept the system's capture dialog on this app's behalf.
+     *
+     * <p>The dialog is the one thing here that needs a person, and an
+     * accessibility service is the one thing on the phone that can click it
+     * without becoming one. An app with no such service leaves this alone and asks
+     * a person.
+     */
+    public static void setDialogClicker(Runnable clicker) {
+        dialogClicker = clicker;
+    }
+
+    /** The status file this service writes, for whoever polls it over adb. */
+    public static File statusFile(Context context) {
+        File directory = context.getExternalFilesDir(null);
+        return directory == null ? null : new File(directory, STATUS_FILE);
+    }
+
+    private void begin(Intent result, int requestedScale) {
+        scale = Math.max(1, requestedScale);
+        frameNumber = 0;
+        MediaProjectionManager manager = getSystemService(MediaProjectionManager.class);
+        if (manager == null) {
+            fail("no MediaProjectionManager");
+            return;
+        }
+        DisplayMetrics metrics = getResources().getDisplayMetrics();
+        width = Math.max(1, metrics.widthPixels / scale);
+        height = Math.max(1, metrics.heightPixels / scale);
+        projection = manager.getMediaProjection(Activity.RESULT_OK, result);
+        if (projection == null) {
+            fail("the projection token was not usable");
+            return;
+        }
+        // API 34 refuses a VirtualDisplay whose projection has no callback, and a
+        // person stopping the capture from the status bar has to end this too.
+        projection.registerCallback(new MediaProjection.Callback() {
+            @Override
+            public void onStop() {
+                Log.i(TAG, "the projection was stopped from outside");
+                stopSelf();
+            }
+        }, new Handler(getMainLooper()));
+
+        thread = new HandlerThread("screen-stream");
+        thread.start();
+        Handler handler = new Handler(thread.getLooper());
+        reader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2);
+        reader.setOnImageAvailableListener(source -> {
+            // The newest image, so a slow copy drops frames instead of queueing
+            // them: this is a live stream, not a recorder that must keep them all.
+            Image image = source.acquireLatestImage();
+            if (image != null) {
+                onImage(image);
+            }
+        }, handler);
+        display = projection.createVirtualDisplay("screen-stream", width, height,
+                metrics.densityDpi, DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                reader.getSurface(), null, handler);
+        listen();
+        live = true;
+        status("streaming");
+    }
+
+    /** Opens the port and keeps accepting; a consumer leaves by disconnecting. */
+    private void listen() {
+        try {
+            server = ServerSocketChannel.open();
+            server.bind(new InetSocketAddress(InetAddress.getByName("127.0.0.1"), PORT));
+        } catch (IOException failed) {
+            fail("could not listen on 127.0.0.1:" + PORT + ": " + failed);
+            return;
+        }
+        new Thread(() -> {
+            while (server.isOpen()) {
+                try {
+                    SocketChannel channel = server.accept();
+                    if (channel == null) {
+                        continue;
+                    }
+                    try {
+                        java.net.Socket socket = channel.socket();
+                        socket.setTcpNoDelay(true);
+                        socket.setSendBufferSize(1 << 20);
+                    } catch (IOException ignored) {
+                        // Defaults are fine when the socket refuses them.
+                    }
+                    Client client = new Client(channel);
+                    clients.add(client);
+                    new Thread(client, "stream-client").start();
+                    Log.i(TAG, "a consumer attached (" + clients.size() + " now)");
+                    status("streaming");
+                } catch (IOException closed) {
+                    return;
+                }
+            }
+        }, "stream-accept").start();
+    }
+
+    /** One composited image: dropped if nothing changed, else numbered and fanned out. */
+    private void onImage(Image image) {
+        try {
+            looked++;
+            Image.Plane plane = image.getPlanes()[0];
+            int stride = plane.getRowStride();
+            int pixelStride = plane.getPixelStride();
+            ByteBuffer buffer = plane.getBuffer();
+            long signature = signature(buffer, stride, pixelStride);
+            if (signature == previousSignature) {
+                return;
+            }
+            previousSignature = signature;
+            changed++;
+            // Numbered whether or not anyone is attached: a frame number is the
+            // count of changes since the capture began, not since it was watched.
+            long number = ++frameNumber;
+            if (SystemClock.elapsedRealtime() - lastStatus > 2000) {
+                status("streaming");
+            }
+            if (clients.isEmpty() && taps.isEmpty()) {
+                // Nobody is watching: the screen still changes, but copying 18 MB
+                // of pixels into a pool nobody will read is not worth it.
+                return;
+            }
+            byte[] pixels = take(stride * height);
+            if (pixels == null) {
+                skipped++;
+                return;
+            }
+            buffer.rewind();
+            buffer.get(pixels, 0, Math.min(pixels.length, buffer.remaining()));
+            fanOut(new Frame(pixels, width, height, stride, number, image.getTimestamp()));
+        } catch (RuntimeException failed) {
+            Log.w(TAG, "could not read a frame", failed);
+        } finally {
+            image.close();
+        }
+    }
+
+    /**
+     * A change detector, not a checksum: samples every eighth pixel in both
+     * directions. A caret, a character or a recoloured cell covers many samples,
+     * so a change that matters is seen; nothing here needs to survive an
+     * adversary.
+     */
+    private static long signature(ByteBuffer buffer, int stride, int pixelStride) {
+        long hash = 0xcbf29ce484222325L;
+        int limit = buffer.limit();
+        int step = CHANGE_STEP * pixelStride;
+        for (int row = 0; row < limit; row += CHANGE_STEP * stride) {
+            int end = Math.min(limit, row + stride);
+            for (int index = row; index + 4 <= end; index += step) {
+                hash ^= buffer.getInt(index);
+                hash *= 0x100000001b3L;
+            }
+        }
+        return hash;
+    }
+
+    private void fanOut(Frame frame) {
+        for (Client client : clients) {
+            if (client.offer(frame)) {
+                sent++;
+            }
+        }
+        for (Tap tap : taps) {
+            frame.holders.incrementAndGet();
+            try {
+                tap.onFrame(frame);
+            } catch (RuntimeException broke) {
+                // A tap that cannot take a frame is not the stream's problem.
+                Log.w(TAG, "a tap dropped a frame", broke);
+                release(frame);
+            }
+        }
+        if (frame.holders.get() == 0) {
+            giveBack(frame);
+        }
+    }
+
+    private static synchronized byte[] take(int size) {
+        if (bufferSize != size) {
+            bufferSize = size;
+            pool.clear();
+            allocated = 0;
+        }
+        byte[] buffer = pool.poll();
+        if (buffer == null && allocated < POOL) {
+            allocated++;
+            buffer = new byte[size];
+        }
+        // No buffer left means every one is still being written to a consumer:
+        // the frame is dropped rather than the stream waiting for a slow link.
+        return buffer;
+    }
+
+    private static synchronized void giveBack(Frame frame) {
+        if (frame.released) {
+            return;
+        }
+        frame.released = true;
+        if (pool.size() < POOL) {
+            pool.addLast(frame.pixels);
+        }
+    }
+
+    /** One attached consumer: newest frame wins, and a stalled one is cut off. */
+    private final class Client implements Runnable {
+        private final SocketChannel channel;
+        private final ArrayBlockingQueue<Frame> queue = new ArrayBlockingQueue<>(1);
+        private volatile boolean alive = true;
+
+        Client(SocketChannel channel) throws IOException {
+            this.channel = channel;
+            channel.configureBlocking(false);
+        }
+
+        boolean offer(Frame frame) {
+            if (!alive) {
+                return false;
+            }
+            Frame stale = queue.poll();
+            if (stale != null) {
+                release(stale);
+            }
+            frame.holders.incrementAndGet();
+            if (!queue.offer(frame)) {
+                release(frame);
+                return false;
+            }
+            return true;
+        }
+
+        @Override
+        public void run() {
+            Selector selector = null;
+            try {
+                selector = Selector.open();
+                ByteBuffer discard = ByteBuffer.allocate(1);
+                while (alive) {
+                    Frame frame = queue.poll(1, java.util.concurrent.TimeUnit.SECONDS);
+                    if (frame == null) {
+                        // A consumer that closed while the screen was still sends
+                        // nothing, so its thread has to look for the close itself.
+                        if (channel.read(discard) < 0) {
+                            break;
+                        }
+                        continue;
+                    }
+                    boolean whole = write(selector, frame.header());
+                    whole &= write(selector, ByteBuffer.wrap(frame.pixels, 0,
+                            frame.stride * frame.height));
+                    release(frame);
+                    if (!whole) {
+                        break;
+                    }
+                }
+            } catch (InterruptedException | IOException ended) {
+                // A consumer that disconnects is normal; a broken one is the same.
+                Log.i(TAG, "client ended: " + ended);
+            } catch (RuntimeException broke) {
+                Log.w(TAG, "client broke", broke);
+            } finally {
+                if (selector != null) {
+                    try {
+                        selector.close();
+                    } catch (IOException ignored) {
+                        // closing what is already gone
+                    }
+                }
+                close();
+            }
+        }
+
+        /** Writes the buffer out, or gives up once the frame's deadline has passed. */
+        private boolean write(Selector selector, ByteBuffer buffer) throws IOException {
+            long deadline = SystemClock.elapsedRealtime() + WRITE_DEADLINE_MS;
+            while (buffer.hasRemaining()) {
+                if (channel.write(buffer) == 0) {
+                    if (SystemClock.elapsedRealtime() > deadline) {
+                        Log.w(TAG, "a consumer could not keep up; disconnecting it");
+                        return false;
+                    }
+                    channel.register(selector, SelectionKey.OP_WRITE);
+                    selector.select(100);
+                    selector.selectedKeys().clear();
+                }
+            }
+            return true;
+        }
+
+        private void close() {
+            alive = false;
+            clients.remove(this);
+            Frame pending = queue.poll();
+            if (pending != null) {
+                release(pending);
+            }
+            try {
+                channel.close();
+            } catch (IOException ignored) {
+                // already closed
+            }
+            status("streaming");
+        }
+    }
+
+    private static void release(Frame frame) {
+        if (frame.holders.decrementAndGet() <= 0) {
+            giveBack(frame);
+        }
+    }
+
+    /**
+     * Something in this process that wants every changed frame without a socket.
+     *
+     * <p>A tap is the reason this exists: a pixel check or an assertion can take
+     * its frames straight from the compositor's output instead of a screenshot
+     * every 333 ms, so it sees every changed frame at the rate the screen changes.
+     * A tap runs on the capture thread and is handed a frame it must
+     * {@link Frame#release()} - the buffer goes back to the pool when the last
+     * holder lets go.
+     */
+    public interface Tap {
+        void onFrame(Frame frame);
+    }
+
+    /**
+     * Asks for every changed frame from now on; false when nothing is capturing.
+     *
+     * @return whether the tap was attached, so a caller can fall back to screenshots
+     */
+    public static boolean subscribe(Tap tap) {
+        if (!live) {
+            return false;
+        }
+        taps.add(tap);
+        return true;
+    }
+
+    public static void unsubscribe(Tap tap) {
+        taps.remove(tap);
+    }
+
+    /** True while a capture is running, so a consumer knows where frames will come from. */
+    public static boolean live() {
+        return live;
+    }
+
+    /**
+     * How many frames this capture has changed so far.
+     *
+     * <p>A screen that is not changing is the last of those frames, still on the
+     * display, so something that samples the screen itself can label what it saw
+     * with the number of the frame it is looking at.
+     */
+    public static long frameNumber() {
+        return frameNumber;
+    }
+
+    /** One changed frame, shared by every consumer it was offered to. */
+    public static final class Frame {
+        public final byte[] pixels;
+        public final int width, height, stride;
+        public final long number, timestampNs;
+        final AtomicInteger holders = new AtomicInteger();
+        volatile boolean released;
+
+        Frame(byte[] pixels, int width, int height, int stride, long number, long timestampNs) {
+            this.pixels = pixels;
+            this.width = width;
+            this.height = height;
+            this.stride = stride;
+            this.number = number;
+            this.timestampNs = timestampNs;
+        }
+
+        /** Hands this frame's buffer back once every holder is done with it. */
+        public void release() {
+            ScreenStream.release(this);
+        }
+
+        ByteBuffer header() {
+            ByteBuffer header = ByteBuffer.allocate(HEADER_BYTES);
+            header.put((byte) 'R').put((byte) 'A').put((byte) 'W').put((byte) '1');
+            header.putInt(width).putInt(height).putInt(stride).putInt(1);
+            header.putLong(number).putLong(timestampNs);
+            header.flip();
+            return header;
+        }
+    }
+
+    private void status(String state) {
+        lastStatus = SystemClock.elapsedRealtime();
+        StringBuilder out = new StringBuilder();
+        out.append("state=").append(state).append('\n');
+        out.append("port=").append(PORT).append('\n');
+        out.append("size=").append(width).append('x').append(height).append('\n');
+        out.append("scale=").append(scale).append('\n');
+        out.append("format=rgba8888\n");
+        out.append("frames_looked=").append(looked).append('\n');
+        out.append("frames_changed=").append(changed).append('\n');
+        out.append("frames_sent=").append(sent).append('\n');
+        out.append("frames_skipped=").append(skipped).append('\n');
+        out.append("clients=").append(clients.size()).append('\n');
+        out.append("taps=").append(taps.size()).append('\n');
+        Status.replace(this, STATUS_FILE, out.toString());
+    }
+
+    private void fail(String why) {
+        live = false;
+        Status.replace(this, STATUS_FILE, "state=failed\nwhy=" + why + "\n");
+        Log.w(TAG, why);
+        stopSelf();
+    }
+
+    static Runnable dialogClicker() {
+        return dialogClicker;
+    }
+
+    private Notification notification() {
+        NotificationManager manager = getSystemService(NotificationManager.class);
+        if (manager != null) {
+            manager.createNotificationChannel(new NotificationChannel("screen_stream",
+                    "Screen stream", NotificationManager.IMPORTANCE_LOW));
+        }
+        return new Notification.Builder(this, "screen_stream")
+                .setContentTitle("Screen stream")
+                .setContentText("Raw frames on 127.0.0.1:" + PORT)
+                .setSmallIcon(android.R.drawable.presence_video_online)
+                .build();
+    }
+
+    @Override
+    public void onDestroy() {
+        live = false;
+        taps.clear();
+        if (reader != null) {
+            reader.close();
+        }
+        if (display != null) {
+            display.release();
+        }
+        if (projection != null) {
+            projection.stop();
+        }
+        if (thread != null) {
+            thread.quitSafely();
+        }
+        if (server != null) {
+            try {
+                server.close();
+            } catch (IOException ignored) {
+                // closing what is already gone
+            }
+        }
+        for (Client client : clients) {
+            client.close();
+        }
+        status("stopped");
+        super.onDestroy();
+    }
+
+    @Override
+    public IBinder onBind(Intent intent) {
+        return null;
+    }
+}

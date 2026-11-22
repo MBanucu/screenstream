@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The stream as an app: install it, tap it, and the phone serves its screen on
+     127.0.0.1:7100 until the capture is stopped. There is no app code in here -
+     the screen is the library's, and this manifest is the whole integration, which
+     is the point: another app is this plus whatever it does itself. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="io.github.mbanucu.screenstream.app">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+
+    <application
+        android:label="Screen stream"
+        android:allowBackup="false">
+
+        <!-- The library's consent activity, as this app's only screen: tapping the
+             icon is what asks for the display. It is also what adb starts, and the
+             stop extra ends the capture without killing the app. -->
+        <activity
+            android:name="io.github.mbanucu.screenstream.ScreenStreamActivity"
+            android:exported="true"
+            android:label="Screen stream">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <service
+            android:name="io.github.mbanucu.screenstream.ScreenStream"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
+    </application>
+</manifest>
