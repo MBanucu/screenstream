@@ -170,7 +170,7 @@ consumer adds **no declarations of its own** — the permissions, the service an
 the activity all come with the dependency.
 
 ```bash
-bash build.sh                          # out/screenstream-0.1.0.aar (+ .jar, sources, .pom)
+bash build.sh    # out/screenstream-0.1.0.aar (+ .jar, sources, javadoc, .pom)
 ```
 
 ```kotlin
@@ -178,7 +178,7 @@ bash build.sh                          # out/screenstream-0.1.0.aar (+ .jar, sou
 android { ... }
 dependencies {
     implementation(files("libs/screenstream-0.1.0.aar"))
-    // or, once it is in a repository: implementation("io.github.mbanucu:screenstream:0.1.0@aar")
+    // or from Maven Central: implementation("io.github.mbanucu:screenstream:0.1.0@aar")
 }
 ```
 
@@ -237,32 +237,104 @@ written in.
   `screenrecord`'s metadata track and with `dumpsys`, so a check that passes on
   frame *n* can name the picture of frame *n*.
 
-## Maven: for the library, not the app
+## Two builds
 
-Yes for the AAR — it is exactly what Maven repositories carry (an `aar` plus a
-`pom`), and it is how a test framework would depend on this. `build.sh` writes
-both, so they can go into any repository:
+`build.sh` is the build this repository was written for: it needs no network and
+no Gradle, and it is what made the published 0.1.0. `build.gradle.kts` is the same
+library for Gradle, and it works on this phone too — Gradle 9.9.2 with AGP 9.5.2,
+which is the AGP line that runs on Gradle 9.6+ (8.x dies on a Gradle internal API
+that was removed there):
 
 ```bash
-mvn deploy:deploy-file \
-    -Durl=https://maven.pkg.github.com/MBanucu/screenstream \
-    -DrepositoryId=github \
-    -Dfile=out/screenstream-0.1.0.aar \
-    -DpomFile=out/screenstream-0.1.0.pom
-# or a local/Nexus repository, same two files
+gradle :assembleRelease          # build/outputs/aar/screenstream-release.aar
 ```
 
-Two things Maven is *not* good for here:
+The two produce the same library, checked rather than assumed: the AAR holds the
+same 12 classes and 179 `javap` signature lines, with the manifest's permissions,
+activity and service intact. The class bytes differ because the two invoke javac
+differently, and the Gradle AAR carries `aar-metadata.properties`.
 
-- **The APK.** Maven repositories can hold any file, but nobody resolves an app as
-  a dependency. The app belongs on a GitHub release (`out/screenstream-app.apk`),
-  or on F-Droid if it should be installable without a cable.
-- **Building it.** JitPack builds a repository with Gradle; this one builds with
-  `build.sh` because it was written on a phone with no aarch64 aapt2. Publishing to
-  Maven Central from here is therefore the "deploy the two files" route, not
-  JitPack's build-from-tag route. Adding a Gradle build file would make JitPack and
-  Central's Gradle publishing work; that is the natural next step for this
-  repository, and it changes nothing about the sources.
+`./gradlew` is checked in, so a machine with nothing but a JDK can build it: the
+wrapper downloads Gradle 9.9.2 itself. There is also CI — `.github/workflows/ci.yml`
+builds both ways on ubuntu and then fails if the two artifacts expose different
+APIs (compared with `javap`, not by trusting that they compile), and
+`.github/workflows/release.yml` publishes a release. That one runs `publish.sh`
+itself rather than a second publishing path, given the four secrets
+`SIGNING_KEY`, `SIGNING_PASSWORD`, `MAVEN_CENTRAL_USERNAME`,
+`MAVEN_CENTRAL_PASSWORD` — which do not exist in this repository yet, so the
+first release run stops at the step that checks for them.
+
+What Gradle adds is what a publication wants rather than what a build needs:
+module metadata (`.module`, which is how a Gradle consumer resolves the AAR without
+an explicit `@aar` — the 0.1.0 POM on Central has none, which is why that
+coordinate needs one), `publishToMavenLocal` for testing a consumer, and a project
+an IDE or JitPack can open. It costs the first run about five minutes in
+downloads; `build.sh` remains the path with no downloads at all. Two things it
+needs on this device are already in place: `android.aapt2FromMavenOverride` in
+`~/.gradle/gradle.properties` points AGP at Termux's own aapt2, and
+`local.properties` (ignored by git) names the SDK.
+
+## Publishing: Maven Central, for the library
+
+Maven is the right home for the AAR — it is what a test framework resolves a
+dependency from, and Central is the one repository a consumer can use without an
+token of their own (GitHub Packages needs authentication even to download a public
+package). The app is not a dependency and does not go there.
+
+Neither Gradle nor Maven is needed for this, and neither is installed here: the
+Central Portal accepts a zip laid out as a Maven repository, so `publish.sh`
+builds, signs and assembles it. One version is 40 files — the AAR, POM, sources
+jar and javadoc jar, each with a `.asc` and four checksums — 163 KB per version.
+
+```bash
+bash publish.sh            # build, sign, checksum: out/screenstream-0.1.0-bundle.zip
+bash publish.sh --upload   # ... and upload it, with the portal's user token
+bash publish.sh --status <deploymentId>   # VALIDATED, PUBLISHING, PUBLISHED
+bash publish.sh --publish <deploymentId>  # release a validated USER_MANAGED one
+```
+
+0.1.0 went out on 2026-11-22 that way (deployment `607463de`), and Central had it
+about four minutes later: the POM, AAR, sources and javadoc answered 200 at
+`repo1.maven.org/maven2/io/github/mbanucu/screenstream/0.1.0/`, and the signature
+on the published POM verifies against the key below.
+
+The token is read from `CENTRAL_USERNAME`/`CENTRAL_PASSWORD` if they are set, and
+otherwise from the `central` server in `~/.m2/settings.xml` — the same place a
+`mvn deploy` on the same machine keeps it, so it is stored once and never typed
+into a shell where the history would keep a copy.
+
+Three things have to be true outside this repository, and none of them are
+repeated per version:
+
+- **The namespace.** `io.github.mbanucu` verified in the Central Portal; signing in
+  with GitHub normally verifies it outright. It is verified — the sibling
+  `android-accessible-terminal` 0.2.0 is published under it.
+- **The signing key.** Central checks signatures against public keyservers, so the
+  public half has to be there. Two keys exist for this account, and only one can
+  sign on this device: `2FDFEB31D3D8DE78F3411F97ED7C9674D046992C`
+  (`MBanucu screenstream`, no passphrase, on `keyserver.ubuntu.com`). The older
+  `2C40010ACF08C13650B3CDD5B7B693555C9FAD64` is passphrase-protected, and that
+  passphrase exists only as the `SIGNING_PASSWORD` secret in the
+  `android-accessible-terminal` repository — a GitHub secret is write-only, so it
+  cannot be read back, and that key can no longer sign anything locally. Pass
+  `PGP_KEY=` to choose a key; `publish.sh` verifies every signature locally before
+  packing, because a bundle that fails validation at the portal spends a version
+  number to learn that.
+- **The portal token.** Account → Generate User Token in the portal; that is the
+  username and password above, in the environment or in `settings.xml`. The
+  signing key has a passphrase, and a shell this is piped through cannot answer
+  gpg's prompt: run `publish.sh` in a terminal (pinentry asks), or pass
+  `PGP_PASSPHRASE=` to sign without asking.
+
+A version number on Central is permanent: 0.1.0 can be followed by 0.2.0 but never
+replaced. The upload validates and then waits (`USER_MANAGED`) for someone to press
+Publish, so a mistake is caught before it is permanent.
+
+Two related things this does not do. The sibling artifact carries Gradle module
+metadata (`.module`); this bundle has only the POM, whose `packaging` is `aar` — so
+a Gradle consumer may need the explicit `@aar` in the dependency, as shown above.
+And JitPack still builds from a tag with Gradle, which this repository deliberately
+does not use, so JitPack is not a route here.
 
 ## Consent
 

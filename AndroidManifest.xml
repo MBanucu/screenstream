@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- The library's own manifest. Gradle merges it into an app that depends on the
-     AAR, so a consumer adds no declarations of its own; an app that compiles the
-     sources directly, the way samples/build.sh does, copies these two elements
-     into its own manifest instead. -->
+     AAR, so a consumer adds no declarations of its own; a build without a manifest
+     merger, the way samples/build.sh links it, copies these elements into the
+     app's manifest instead. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="io.github.mbanucu.screenstream">
 

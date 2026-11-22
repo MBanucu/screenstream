@@ -3,7 +3,8 @@
 # whose toolchain has no aarch64 aapt2, so the build is the steps Gradle would
 # take, scripted.
 #
-#   bash build.sh              # library: out/screenstream-<version>.aar, .jar, -sources.jar, .pom
+#   bash build.sh              # library: out/screenstream-<version>.aar, .jar, -sources.jar,
+#                              #          -javadoc.jar, .pom
 #   bash build.sh apk          # app: out/screenstream-app.apk, installable and driven by adb
 #   VERSION=0.2.0 bash build.sh
 #
@@ -13,8 +14,10 @@
 #                 the service and the activity, and R.txt (empty, no resources)
 #   .jar          a test framework that already has android.jar on its classpath
 #   -sources.jar  a project that would rather read the four files than trust a binary
+#   -javadoc.jar  required by Maven Central next to every artifact; the API docs,
+#                 generated from the same four files
 #   .pom          the Maven descriptor, so the AAR can be deployed to any repository
-#                 as it is (see README, "Maven")
+#                 as it is (see README, "Publishing"; publish.sh signs and uploads it)
 #
 # d8 runs over the library jar as a check: an AAR whose classes.jar cannot be
 # dexed on its own is not a library, however well it compiles against android.jar.
@@ -132,6 +135,24 @@ with zipfile.ZipFile(jar, 'w', zipfile.ZIP_DEFLATED) as z:
             z.write(path, os.path.relpath(path, root))
 EOF
 
+# --- javadoc -------------------------------------------------------------------
+# Maven Central refuses a component without a javadoc jar, and the AAR's sources
+# reference android.*, so the docs need android.jar on the classpath as well.
+echo "== screenstream $version: javadoc =="
+mkdir -p "$work/javadoc"
+javadoc -quiet -Xdoclint:none --release 17 -classpath "$android_jar" \
+    -windowtitle "screenstream $version" -doctitle "screenstream $version" \
+    -d "$work/javadoc" "${files[@]}"
+python3 - "$work/javadoc" "$out/screenstream-$version-javadoc.jar" <<'EOF'
+import os, sys, zipfile
+root, jar = sys.argv[1], sys.argv[2]
+with zipfile.ZipFile(jar, 'w', zipfile.ZIP_DEFLATED) as z:
+    for base, _, files in os.walk(root):
+        for name in files:
+            path = os.path.join(base, name)
+            z.write(path, os.path.relpath(path, root))
+EOF
+
 cat > "$out/screenstream-$version.pom" <<POM
 <?xml version="1.0" encoding="UTF-8"?>
 <project xmlns="http://maven.apache.org/POM/4.0.0"
@@ -170,6 +191,7 @@ POM
 
 rm -rf "$work"
 for artifact in "screenstream-$version.aar" "screenstream-$version.jar" \
-        "screenstream-$version-sources.jar" "screenstream-$version.pom"; do
+        "screenstream-$version-sources.jar" "screenstream-$version-javadoc.jar" \
+        "screenstream-$version.pom"; do
     printf 'built %s (%s bytes)\n' "$out/$artifact" "$(wc -c < "$out/$artifact")"
 done
