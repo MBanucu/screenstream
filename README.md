@@ -54,17 +54,37 @@ stalls for two seconds; it never slows the screen down.
 ```bash
 bash build.sh apk                      # out/screenstream-app.apk
 adb install -r out/screenstream-app.apk
-adb shell am start -n io.github.mbanucu.screenstream.app/io.github.mbanucu.screenstream.ScreenStreamActivity
-adb forward tcp:7100 tcp:7100
-python3 client/stream.py --seconds 5 --png out/stream
-adb shell am start -n io.github.mbanucu.screenstream.app/io.github.mbanucu.screenstream.ScreenStreamActivity --ez stop true
+
+# With a screen: tap the icon, or start the UI.
+adb shell am start -n io.github.mbanucu.screenstream.app/.StreamUiActivity
+
+# Without one: the library's activity, which asks, starts, and records.
+adb shell am start -n io.github.mbanucu.screenstream.app/io.github.mbanucu.screenstream.ScreenStreamActivity \
+    --ez record true
+adb forward tcp:7200 tcp:7100          # 7200, not 7100: see the note below
+python3 client/stream.py --port 7200 --seconds 5 --png out/stream
+adb shell am start -n io.github.mbanucu.screenstream.app/io.github.mbanucu.screenstream.ScreenStreamActivity \
+    --ez stop true
 ```
 
-The app has no code of its own: its manifest is a launcher over the library's
-consent activity. Tapping the icon and starting it from adb are the same thing —
-the system asks for the display, and once it is granted the app serves the screen
-until the capture is stopped, from the notification, with `--ez stop true`, or by
+The UI has the two halves: **Start**/**Stop** for the capture, **Record**/**Stop
+recording** for the MP4, a half-size switch, and the state the service reports —
+frame size, changed frames, port, and how much has been written. Tapping the icon
+and starting it from adb are the same thing: the system asks for the display, and
+once it is granted the app serves the screen and records it until the capture is
+stopped, from the notification, from the UI, with `--ez stop true`, or by
 force-stopping the app.
+
+The adb commands go to `ScreenStreamActivity`, not to the UI activity, because
+each `am start` makes a fresh instance of it: starting a *running* activity again
+is delivered as `onNewIntent`, which is not a path a script can rely on. Adb's
+`--ez record true` records into the app's `recordings/` directory; the path is in
+the state file.
+
+**A note on the port.** `adb forward tcp:7100 tcp:7100` collides when the machine
+holding adb is the phone itself (Termux, say): the forward's listener and the
+stream's listener are the same loopback port, and the capture fails to bind. Use
+`7200` on the host side, as above, and `--port 7200` for the client.
 
 What it is doing is in `Android/data/io.github.mbanucu.screenstream.app/files/screenstream.txt`:
 
@@ -80,7 +100,53 @@ frames_sent=              frames handed to consumers
 frames_skipped=           frames dropped because every buffer was in use
 clients=                 socket consumers attached
 taps=                    in-process consumers attached
+recording=               the MP4 being written, or - when there is none
+recorded_frames=         frames written to it (or to the last one)
+recorded_ms=             its length so far, from the last frame written
 ```
+
+## Recording to a file
+
+**Record** (or `--ez record true`) writes an H.264 MP4 next to the stream. It is
+the same capture, because it has to be: a projection allows one virtual display,
+and a second `createVirtualDisplay` on the same token is refused — it also
+invalidates the capture, which is worth knowing before trying it. So the recorder
+is fed the frames the stream has already copied and encodes them itself, which has
+one property worth having: the video and the socket carry the same frames, so a
+frame number in a test answer and a picture in the file are the same moment.
+
+What that costs is the colour conversion the compositor would otherwise do. The
+encoder wants YUV, the stream is RGBA, so the conversion runs on its own thread and
+drops frames the encoder cannot keep up with. The file is therefore VFR like the
+stream — it gets a frame when the screen changed, and the timestamps are the real
+ones, shifted so the file starts at zero. A still screen records as a still video.
+
+Measured on this phone, 1440x3200: a 9 s capture wrote 66 frames to a 2.9 MB file,
+`ffprobe` reads it as h264 1440x3200, 9.01 s, 66 frames, and a frame from the
+middle is not black. The bitrate is ~14 Mbps at that size (about 0.12 bits per
+pixel per frame at 30 fps), a keyframe every two seconds.
+
+## Twitch, and what streaming still needs
+
+Recording is the video half of an RTMP publish, and nothing more than that: there
+is no RTMP client here. Streaming to Twitch means:
+
+1. **FLV muxing of the tags this encoder already produces.** `MediaMuxer` cannot
+   write FLV, so the output would go to a small tag writer instead: an FLV header,
+   then one video tag per access unit with its timestamp. That part is a few
+   hundred lines and testable offline by writing a file and playing it.
+2. **An RTMP client.** Handshake (C0/C1/C2), `connect`/`createStream`/`publish`
+   over AMF0, then chunked audio and video messages on a socket. That is the part
+   that is genuinely new, and the part that needs a real stream key to verify
+   against Twitch's ingest — not something to ship untested.
+3. **An audio track.** Twitch's ingest expects AAC audio alongside H.264 video;
+   video-only streams are rejected. On Android that means `AudioPlaybackCapture`
+   (API 29+) for the device's sound or the microphone, encoded with `MediaCodec`
+   AAC and interleaved with the video tags.
+
+The design already fits: the recorder's drain loop is where the encoded access
+units appear, so a second sink (an RTMP writer instead of `MediaMuxer`) can be fed
+from the same place without touching the capture.
 
 ## As a library, for apps and test frameworks
 
@@ -127,6 +193,13 @@ ScreenStream.subscribe(frame -> {
 ScreenStream.live();          // is a capture running in this process?
 ScreenStream.frameNumber();   // changes since the capture began
 ScreenStream.stop(this);
+
+// The same capture, as a file: H.264/MP4, real timestamps, VFR.
+ScreenStream.record(new File(dir, "run.mp4"));
+ScreenStream.recording();          // is a file being written?
+ScreenStream.recordedFrames();
+ScreenStream.recordedMilliseconds();
+ScreenStream.stopRecording();      // finalises the file; the index is written here
 ```
 
 A screen that is *not changing* is the last frame the source sent, still on the

@@ -133,6 +133,8 @@ public final class ScreenStream extends Service {
 
     private MediaProjection projection;
     private VirtualDisplay display;
+    private volatile Recorder recorder;
+    private volatile long lastRecordedFrames, lastRecordedMs;
     private ImageReader reader;
     private HandlerThread thread;
     private ServerSocketChannel server;
@@ -145,6 +147,7 @@ public final class ScreenStream extends Service {
     private static int allocated;
     /** True while a capture is running in this process, so a tap knows to wait. */
     private static volatile boolean live;
+    private static volatile ScreenStream self;
     private static long frameNumber;
     private static volatile Runnable dialogClicker;
     private long previousSignature;
@@ -182,6 +185,123 @@ public final class ScreenStream extends Service {
     /** Ends the capture; the notification and the port go with it. */
     public static void stop(Context context) {
         context.stopService(new Intent(context, ScreenStream.class));
+    }
+
+    /**
+     * Writes the display to {@code file} as an H.264 MP4, beside the raw stream.
+     *
+     * <p>A projection allows one virtual display, so the recording cannot capture
+     * the screen by itself: it encodes the frames the stream has already copied,
+     * which also means the video and the socket carry the same frames. Time zero in
+     * the file is the first frame after this was called.
+     *
+     * @return false when nothing is capturing, or a recording is already running
+     */
+    public static boolean record(File file) {
+        ScreenStream stream = self;
+        return stream != null && stream.startRecording(file);
+    }
+
+    /** Ends the recording and finalises the file; safe to call when there is none. */
+    public static void stopRecording() {
+        ScreenStream stream = self;
+        if (stream != null) {
+            stream.endRecording();
+        }
+    }
+
+    public static boolean recording() {
+        ScreenStream stream = self;
+        return stream != null && stream.recorder != null;
+    }
+
+    /** The file being written, or null when nothing is recording. */
+    public static File recordingFile() {
+        ScreenStream stream = self;
+        Recorder running = stream == null ? null : stream.recorder;
+        return running == null ? null : running.file();
+    }
+
+    /** Frames the current recording has written, or the last one wrote. */
+    public static long recordedFrames() {
+        ScreenStream stream = self;
+        if (stream == null) {
+            return 0;
+        }
+        Recorder running = stream.recorder;
+        return running == null ? stream.lastRecordedFrames : running.frames();
+    }
+
+    /** How long the recording runs so far, from the last frame the encoder wrote. */
+    public static long recordedMilliseconds() {
+        ScreenStream stream = self;
+        if (stream == null) {
+            return 0;
+        }
+        Recorder running = stream.recorder;
+        return running == null ? stream.lastRecordedMs : running.milliseconds();
+    }
+
+    /** Frame size of the running capture, or 0 when there is none. */
+    public static int captureWidth() {
+        ScreenStream stream = self;
+        return stream == null ? 0 : stream.width;
+    }
+
+    public static int captureHeight() {
+        ScreenStream stream = self;
+        return stream == null ? 0 : stream.height;
+    }
+
+    private synchronized boolean startRecording(File file) {
+        if (!live || recorder != null) {
+            return false;
+        }
+        try {
+            recorder = Recorder.start(file, width, height);
+            status("streaming");
+            Log.i(TAG, "recording to " + file);
+            return true;
+        } catch (IOException | RuntimeException failed) {
+            Log.w(TAG, "could not start recording", failed);
+            return false;
+        }
+    }
+
+    /** Stops feeding the recorder and lets it finish in the background. */
+    private void endRecording() {
+        Recorder ending = detachRecording();
+        if (ending == null) {
+            return;
+        }
+        new Thread(() -> finishRecording(ending), "screen-stream-record-stop").start();
+    }
+
+    private synchronized Recorder detachRecording() {
+        Recorder ending = recorder;
+        if (ending == null) {
+            return null;
+        }
+        recorder = null;
+        lastRecordedFrames = ending.frames();
+        lastRecordedMs = ending.milliseconds();
+        return ending;
+    }
+
+    /** Blocks until the encoder has written its last frames and the file's index. */
+    private void finishRecording(Recorder ending) {
+        ending.stop();
+        lastRecordedFrames = ending.frames();
+        lastRecordedMs = ending.milliseconds();
+        if (ending.failure() != null) {
+            Log.w(TAG, "recording ended with: " + ending.failure());
+        }
+        Log.i(TAG, "recording finished: " + lastRecordedFrames + " frames, "
+                + lastRecordedMs + " ms");
+        // The recording outlives the capture it was started with: this runs on its
+        // own thread and may land after the service has stopped, and a "streaming"
+        // written then would describe a service that is gone.
+        status(live ? "streaming" : "stopped");
     }
 
     /**
@@ -243,19 +363,25 @@ public final class ScreenStream extends Service {
         display = projection.createVirtualDisplay("screen-stream", width, height,
                 metrics.densityDpi, DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
                 reader.getSurface(), null, handler);
-        listen();
+        // A port that cannot be opened is not a capture: another stream on the
+        // phone already has 7100, and saying "streaming" would be a lie that a UI
+        // and a recording would both act on.
+        if (!listen()) {
+            return;
+        }
         live = true;
+        self = this;
         status("streaming");
     }
 
     /** Opens the port and keeps accepting; a consumer leaves by disconnecting. */
-    private void listen() {
+    private boolean listen() {
         try {
             server = ServerSocketChannel.open();
             server.bind(new InetSocketAddress(InetAddress.getByName("127.0.0.1"), PORT));
         } catch (IOException failed) {
             fail("could not listen on 127.0.0.1:" + PORT + ": " + failed);
-            return;
+            return false;
         }
         new Thread(() -> {
             while (server.isOpen()) {
@@ -281,12 +407,19 @@ public final class ScreenStream extends Service {
                 }
             }
         }, "stream-accept").start();
+        return true;
     }
 
     /** One composited image: dropped if nothing changed, else numbered and fanned out. */
     private void onImage(Image image) {
         try {
             looked++;
+            // The state file is what a phone without a UI is watched through, so
+            // it follows the clock rather than the screen: a still display must
+            // not make a running capture look stopped, nor a recording silent.
+            if (SystemClock.elapsedRealtime() - lastStatus > 2000) {
+                status(live ? "streaming" : "stopped");
+            }
             Image.Plane plane = image.getPlanes()[0];
             int stride = plane.getRowStride();
             int pixelStride = plane.getPixelStride();
@@ -300,10 +433,7 @@ public final class ScreenStream extends Service {
             // Numbered whether or not anyone is attached: a frame number is the
             // count of changes since the capture began, not since it was watched.
             long number = ++frameNumber;
-            if (SystemClock.elapsedRealtime() - lastStatus > 2000) {
-                status("streaming");
-            }
-            if (clients.isEmpty() && taps.isEmpty()) {
+            if (clients.isEmpty() && taps.isEmpty() && recorder == null) {
                 // Nobody is watching: the screen still changes, but copying 18 MB
                 // of pixels into a pool nobody will read is not worth it.
                 return;
@@ -347,6 +477,22 @@ public final class ScreenStream extends Service {
         for (Client client : clients) {
             if (client.offer(frame)) {
                 sent++;
+            }
+        }
+        // The recording is a consumer like any other: it counts a holder and lets
+        // go when the encoder has copied the frame, so it can never keep the pool
+        // waiting for a slow encoder.
+        Recorder writing = recorder;
+        if (writing != null && writing.closed()) {
+            // The encoder gave up on its own: stop saying it is recording, so a UI
+            // or a status reader is not told about a file that stopped growing.
+            endRecording();
+            writing = null;
+        }
+        if (writing != null) {
+            frame.holders.incrementAndGet();
+            if (!writing.offer(frame)) {
+                release(frame);
             }
         }
         for (Tap tap : taps) {
@@ -590,6 +736,13 @@ public final class ScreenStream extends Service {
         out.append("frames_skipped=").append(skipped).append('\n');
         out.append("clients=").append(clients.size()).append('\n');
         out.append("taps=").append(taps.size()).append('\n');
+        Recorder running = recorder;
+        out.append("recording=")
+                .append(running == null ? "-" : running.file().getAbsolutePath()).append('\n');
+        out.append("recorded_frames=")
+                .append(running == null ? lastRecordedFrames : running.frames()).append('\n');
+        out.append("recorded_ms=")
+                .append(running == null ? lastRecordedMs : running.milliseconds()).append('\n');
         Status.replace(this, STATUS_FILE, out.toString());
     }
 
@@ -620,7 +773,14 @@ public final class ScreenStream extends Service {
     @Override
     public void onDestroy() {
         live = false;
+        self = null;
         taps.clear();
+        // Blocking, unlike the UI's stop: a service being torn down has one chance
+        // to write the MP4's index, and a file without one cannot be played.
+        Recorder ending = detachRecording();
+        if (ending != null) {
+            finishRecording(ending);
+        }
         if (reader != null) {
             reader.close();
         }

@@ -49,6 +49,12 @@ mkdir -p "$work/classes" "$work/dex" "$out"
 # --- java ----------------------------------------------------------------------
 echo "== screenstream $version: javac =="
 mapfile -t files < <(find "$sources" -name '*.java')
+if [ "$mode" = apk ] && [ -d "$here/app/src" ]; then
+    # The app's own classes are compiled with the library's: it is one dex, the
+    # way a Gradle app's dex is its code plus the AAR's.
+    mapfile -t app_files < <(find "$here/app/src" -name '*.java')
+    files+=("${app_files[@]}")
+fi
 javac -nowarn --release 17 -classpath "$android_jar" -d "$work/classes" "${files[@]}"
 
 python3 - "$work/classes" "$out/screenstream-$version.jar" <<'EOF'

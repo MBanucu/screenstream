@@ -22,13 +22,23 @@ import android.util.Log;
  * </pre>
  *
  * <p>Extras: {@code --ei scale 2} captures at half size, which is what a machine
- * on the far side of a wireless link wants; {@code --ez stop true} ends a capture
- * that is already running, without touching anything else the app has bound.
+ * on the far side of a wireless link wants; {@code --ez record true} also records
+ * the capture to an MP4 in the app's {@code recordings} directory; {@code --ez
+ * stop true} ends the recording and the capture, without touching anything else
+ * the app has bound.
+ *
+ * <p>It is the activity to drive from adb because each {@code am start} makes a
+ * new instance of it: a running activity that is started again gets the intent as
+ * {@code onNewIntent}, which is not a path a command can rely on.
  */
 public final class ScreenStreamActivity extends Activity {
 
     private static final String TAG = "ScreenStream";
     private static final int REQUEST_CAPTURE = 1;
+    /** How long to wait for the service to be capturing before recording. */
+    private static final long RECORD_WAIT_MS = 5000;
+
+    private boolean recordAfterGrant;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -38,10 +48,12 @@ public final class ScreenStreamActivity extends Activity {
         // app that is also an accessibility service keeps that binding, so a run
         // that ends this way does not cost the next one a rebind.
         if (getIntent().getBooleanExtra("stop", false)) {
+            ScreenStream.stopRecording();
             ScreenStream.stop(this);
             finish();
             return;
         }
+        recordAfterGrant = getIntent().getBooleanExtra("record", false);
         MediaProjectionManager manager = getSystemService(MediaProjectionManager.class);
         if (manager == null) {
             fail("no MediaProjectionManager on this device");
@@ -81,6 +93,39 @@ public final class ScreenStreamActivity extends Activity {
         ScreenStream.start(this, data, scale);
         Log.i(TAG, "screen capture granted; the stream service is starting");
         finish();
+        if (recordAfterGrant) {
+            recordAfterGrant = false;
+            recordWhenLive(System.currentTimeMillis() + RECORD_WAIT_MS);
+        }
+    }
+
+    /** The service starts a frame later than the grant; a recording waits for it. */
+    private void recordWhenLive(final long deadline) {
+        if (ScreenStream.live()) {
+            startRecording();
+            return;
+        }
+        if (System.currentTimeMillis() > deadline) {
+            fail("the capture did not start in time to record it");
+            return;
+        }
+        new android.os.Handler(getMainLooper()).postDelayed(
+                () -> recordWhenLive(deadline), 100);
+    }
+
+    /** Opens a file in the app's recordings directory and starts writing to it. */
+    private void startRecording() {
+        java.io.File directory = getExternalFilesDir("recordings");
+        if (directory == null || (!directory.isDirectory() && !directory.mkdirs())) {
+            fail("no recordings directory on this device");
+            return;
+        }
+        String name = "screen-" + new java.text.SimpleDateFormat("yyyyMMdd-HHmmss",
+                java.util.Locale.US).format(new java.util.Date()) + ".mp4";
+        java.io.File file = new java.io.File(directory, name);
+        Log.i(TAG, ScreenStream.record(file)
+                ? "recording to " + file
+                : "could not start recording to " + file);
     }
 
     private void fail(String why) {

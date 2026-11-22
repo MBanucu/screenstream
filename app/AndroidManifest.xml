@@ -14,11 +14,12 @@
         android:label="Screen stream"
         android:allowBackup="false">
 
-        <!-- The library's consent activity, as this app's only screen: tapping the
-             icon is what asks for the display. It is also what adb starts, and the
-             stop extra ends the capture without killing the app. -->
+        <!-- The app's own screen: start and stop the capture, record to a file,
+             and see what the service is doing. Tapping the icon is what asks for
+             the display. The record extra starts a recording instead of waiting for a
+             finger; the stop extra ends both without killing the app. -->
         <activity
-            android:name="io.github.mbanucu.screenstream.ScreenStreamActivity"
+            android:name=".StreamUiActivity"
             android:exported="true"
             android:label="Screen stream">
             <intent-filter>
@@ -26,6 +27,13 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- The library's own consent activity, kept for a phone with no finger:
+             adb starts this to capture, and to stop a capture, with no UI. -->
+        <activity
+            android:name="io.github.mbanucu.screenstream.ScreenStreamActivity"
+            android:exported="true"
+            android:label="Screen stream (no UI)" />
 
         <service
             android:name="io.github.mbanucu.screenstream.ScreenStream"
