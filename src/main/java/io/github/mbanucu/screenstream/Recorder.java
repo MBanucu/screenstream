@@ -21,7 +21,15 @@ import java.util.concurrent.TimeUnit;
  * capture - so this is fed the frames the raw stream already copied, and encodes
  * them itself. That has one property worth having: the video and the socket carry
  * the same frames, so a picture in the file and a frame number in a test answer are
- * the same moment, not two captures that were close together.
+ * the same capture, not two that were taken close together.
+ *
+ * <p>They are not the same *index*, though. The recording starts at whatever frame
+ * the stream had reached, so the file's first frame is stream frame n and not 0;
+ * and this drops a frame when the encoder is busy, so the file's frames are a
+ * subset. What is exact is the time: a frame's timestamp is the stream's own,
+ * shifted so the file starts at zero, and {@link #startedAtUs()} is that shift.
+ * A test therefore locates its picture at {@code ts_ns - recording_from_ns}, which
+ * is what the status file reports.
  *
  * <p>The cost is the colour conversion the compositor would otherwise do: the
  * encoder wants YUV and the stream is RGBA, so this converts on its own thread and
@@ -92,6 +100,14 @@ final class Recorder {
 
     File file() {
         return file;
+    }
+
+    /**
+     * Presentation time of the file's first frame, in the device's clock, or -1
+     * while there is none. This is what the file's zero is on the stream's clock.
+     */
+    long startedAtUs() {
+        return baseUs;
     }
 
     long frames() {

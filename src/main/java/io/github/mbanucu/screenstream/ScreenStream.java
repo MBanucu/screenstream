@@ -134,7 +134,7 @@ public final class ScreenStream extends Service {
     private MediaProjection projection;
     private VirtualDisplay display;
     private volatile Recorder recorder;
-    private volatile long lastRecordedFrames, lastRecordedMs;
+    private volatile long lastRecordedFrames, lastRecordedMs, lastRecordedFromNs;
     private ImageReader reader;
     private HandlerThread thread;
     private ServerSocketChannel server;
@@ -191,9 +191,10 @@ public final class ScreenStream extends Service {
      * Writes the display to {@code file} as an H.264 MP4, beside the raw stream.
      *
      * <p>A projection allows one virtual display, so the recording cannot capture
-     * the screen by itself: it encodes the frames the stream has already copied,
-     * which also means the video and the socket carry the same frames. Time zero in
-     * the file is the first frame after this was called.
+     * the screen by itself: it encodes the frames the stream has already copied.
+     * Time zero in the file is the first frame it encoded, whose time on the
+     * stream's clock is the status file's {@code recording_from_ns}; the frames
+     * after it are the stream's, minus the ones the encoder was too busy for.
      *
      * @return false when nothing is capturing, or a recording is already running
      */
@@ -285,6 +286,7 @@ public final class ScreenStream extends Service {
         recorder = null;
         lastRecordedFrames = ending.frames();
         lastRecordedMs = ending.milliseconds();
+        lastRecordedFromNs = Math.max(0, ending.startedAtUs()) * 1000;
         return ending;
     }
 
@@ -743,6 +745,13 @@ public final class ScreenStream extends Service {
                 .append(running == null ? lastRecordedFrames : running.frames()).append('\n');
         out.append("recorded_ms=")
                 .append(running == null ? lastRecordedMs : running.milliseconds()).append('\n');
+        // What the file's zero is on the stream's clock: a frame's ts_ns minus this
+        // is where its picture is in the recording. The stream numbers its frames
+        // from the start of the capture, the file from its own first frame - and
+        // drops the ones the encoder was too busy for - so the numbers differ.
+        out.append("recording_from_ns=")
+                .append(running == null ? lastRecordedFromNs
+                        : Math.max(0, running.startedAtUs()) * 1000).append('\n');
         Status.replace(this, STATUS_FILE, out.toString());
     }
 

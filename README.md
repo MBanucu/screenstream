@@ -103,6 +103,8 @@ taps=                    in-process consumers attached
 recording=               the MP4 being written, or - when there is none
 recorded_frames=         frames written to it (or to the last one)
 recorded_ms=             its length so far, from the last frame written
+recording_from_ns=       the file's zero on the stream's clock: a frame's
+                         timestamp minus this is where its picture is in it
 ```
 
 ## Recording to a file
@@ -111,20 +113,32 @@ recorded_ms=             its length so far, from the last frame written
 the same capture, because it has to be: a projection allows one virtual display,
 and a second `createVirtualDisplay` on the same token is refused — it also
 invalidates the capture, which is worth knowing before trying it. So the recorder
-is fed the frames the stream has already copied and encodes them itself, which has
-one property worth having: the video and the socket carry the same frames, so a
-frame number in a test answer and a picture in the file are the same moment.
+is fed the frames the stream has already copied and encodes them itself: the video
+and the socket carry the same capture, and a picture in the file is a frame that
+was also on the stream.
 
-What that costs is the colour conversion the compositor would otherwise do. The
-encoder wants YUV, the stream is RGBA, so the conversion runs on its own thread and
-drops frames the encoder cannot keep up with. The file is therefore VFR like the
-stream — it gets a frame when the screen changed, and the timestamps are the real
-ones, shifted so the file starts at zero. A still screen records as a still video.
+What that costs is the colour conversion the compositor would otherwise do, and it
+is visible in the files: the encoder wants YUV, the stream is RGBA, so the
+conversion runs on its own thread and drops frames the encoder cannot keep up
+with. A still screen records as a still video, and a busy one keeps only the frames
+that thread got through.
+
+That is why the file's frame *numbers* are not the stream's. It starts wherever
+the capture was when recording began, so its first frame is stream frame n rather
+than 0, and the dropped frames mean it holds a subset. What is exact is the time:
+each frame carries the stream's own timestamp, shifted so the file starts at zero,
+and `recording_from_ns` is that shift. A test that passed on a frame at `ts_ns`
+looks for it at `ts_ns - recording_from_ns`.
 
 Measured on this phone, 1440x3200: a 9 s capture wrote 66 frames to a 2.9 MB file,
 `ffprobe` reads it as h264 1440x3200, 9.01 s, 66 frames, and a frame from the
 middle is not black. The bitrate is ~14 Mbps at that size (about 0.12 bits per
-pixel per frame at 30 fps), a keyframe every two seconds.
+pixel per frame at 30 fps), a keyframe every two seconds. Over a busy two-minute
+`STREAM=1 VIDEO=1 samples/e2e.sh` run the compositor offered 1248 changed frames
+and the file kept 390 of them (137 s, 2.8 frames a second): readable, and choppy
+the way a busy screen at native size is. The conversion is where the time goes,
+so a half-size recording is the obvious lever - a quarter of the pixels - though
+it is not measured yet.
 
 ## Twitch, and what streaming still needs
 
