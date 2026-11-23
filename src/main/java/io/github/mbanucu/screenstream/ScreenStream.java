@@ -134,6 +134,9 @@ public final class ScreenStream extends Service {
     private MediaProjection projection;
     private VirtualDisplay display;
     private volatile Recorder recorder;
+    /** The encoder that exists only while someone watches the encoded stream. */
+    private volatile Recorder streamEncoder;
+    private volatile EncodedStream encoded;
     private volatile long lastRecordedFrames, lastRecordedMs, lastRecordedFromNs;
     private ImageReader reader;
     private HandlerThread thread;
@@ -260,6 +263,17 @@ public final class ScreenStream extends Service {
         }
         try {
             recorder = Recorder.start(file, width, height);
+            // One encoder for both consumers: a viewer that was watching the live
+            // encoder moves to the recording's, so the picture and the file stay the
+            // same capture instead of two encodings of it.
+            if (encoded != null && encoded.clients() > 0) {
+                Recorder live = streamEncoder;
+                streamEncoder = null;
+                encoded.attach(recorder);
+                if (live != null) {
+                    new Thread(live::stop, "screen-stream-encode-stop").start();
+                }
+            }
             status("streaming");
             Log.i(TAG, "recording to " + file);
             return true;
@@ -276,6 +290,11 @@ public final class ScreenStream extends Service {
             return;
         }
         new Thread(() -> finishRecording(ending), "screen-stream-record-stop").start();
+        // A viewer must not stop watching because the recording stopped: it gets a
+        // live encoder of its own again, from the next frame on.
+        if (encoded != null && encoded.clients() > 0) {
+            ensureStreamEncoder();
+        }
     }
 
     private synchronized Recorder detachRecording() {
@@ -304,6 +323,56 @@ public final class ScreenStream extends Service {
         // own thread and may land after the service has stopped, and a "streaming"
         // written then would describe a service that is gone.
         status(live ? "streaming" : "stopped");
+    }
+
+    /** A viewer arrived or left; the encoder exists only while one is watching. */
+    private synchronized void encodedClients(int count) {
+        if (count > 0) {
+            ensureStreamEncoder();
+        } else {
+            stopStreamEncoder();
+        }
+    }
+
+    /**
+     * Makes sure something is encoding for the viewers.
+     *
+     * <p>A recording already has an encoder and is the one to use: one encode feeds
+     * the file and the socket, so they cannot show different pictures. With no
+     * recording, an encoder with no file is started, and it stops when the last
+     * viewer leaves.
+     */
+    private void ensureStreamEncoder() {
+        if (encoded == null || !live) {
+            return;
+        }
+        Recorder source = recorder;
+        if (source == null) {
+            source = streamEncoder;
+            if (source == null) {
+                try {
+                    source = Recorder.start(null, width, height);
+                } catch (IOException | RuntimeException failed) {
+                    Log.w(TAG, "no encoder for the encoded stream", failed);
+                    return;
+                }
+                streamEncoder = source;
+            }
+        }
+        encoded.attach(source);
+        source.requestSync();
+    }
+
+    private synchronized void stopStreamEncoder() {
+        if (encoded != null) {
+            encoded.attach(null);
+        }
+        Recorder ending = streamEncoder;
+        streamEncoder = null;
+        if (ending != null) {
+            // Stopping waits for the encoder's last frames; not on this thread.
+            new Thread(ending::stop, "screen-stream-encode-stop").start();
+        }
     }
 
     /**
@@ -371,8 +440,16 @@ public final class ScreenStream extends Service {
         if (!listen()) {
             return;
         }
+        // The encoded stream is an extra, not the capture: a port that cannot be
+        // opened costs the raw stream nothing, so it is logged and left out.
+        encoded = EncodedStream.open(this::encodedClients);
         live = true;
         self = this;
+        // A viewer that attached before the capture was marked live has no encoder
+        // yet; give it one now rather than leaving it waiting for a keyframe.
+        if (encoded != null && encoded.clients() > 0) {
+            ensureStreamEncoder();
+        }
         status("streaming");
     }
 
@@ -435,7 +512,8 @@ public final class ScreenStream extends Service {
             // Numbered whether or not anyone is attached: a frame number is the
             // count of changes since the capture began, not since it was watched.
             long number = ++frameNumber;
-            if (clients.isEmpty() && taps.isEmpty() && recorder == null) {
+            if (clients.isEmpty() && taps.isEmpty() && recorder == null
+                    && streamEncoder == null) {
                 // Nobody is watching: the screen still changes, but copying 18 MB
                 // of pixels into a pool nobody will read is not worth it.
                 return;
@@ -494,6 +572,13 @@ public final class ScreenStream extends Service {
         if (writing != null) {
             frame.holders.incrementAndGet();
             if (!writing.offer(frame)) {
+                release(frame);
+            }
+        }
+        Recorder live = streamEncoder;
+        if (live != null && live != writing) {
+            frame.holders.incrementAndGet();
+            if (!live.offer(frame)) {
                 release(frame);
             }
         }
@@ -752,6 +837,19 @@ public final class ScreenStream extends Service {
         out.append("recording_from_ns=")
                 .append(running == null ? lastRecordedFromNs
                         : Math.max(0, running.startedAtUs()) * 1000).append('\n');
+        // The encoded stream: the same frames as H.264 on a second port, for a
+        // viewer that would rather not receive raw RGBA. The encoder is named so a
+        // reader can tell the hardware component from a software one.
+        EncodedStream viewers = encoded;
+        Recorder live = streamEncoder;
+        out.append("encoded_port=").append(viewers == null ? "-" : String.valueOf(EncodedStream.PORT))
+                .append('\n');
+        out.append("encoded_clients=").append(viewers == null ? 0 : viewers.clients()).append('\n');
+        out.append("encoded_frames=").append(viewers == null ? 0 : viewers.samples()).append('\n');
+        out.append("encoded_bytes=").append(viewers == null ? 0 : viewers.bytes()).append('\n');
+        out.append("encoder=")
+                .append(running != null ? running.codecName()
+                        : live != null ? live.codecName() : "-").append('\n');
         Status.replace(this, STATUS_FILE, out.toString());
     }
 
@@ -774,7 +872,8 @@ public final class ScreenStream extends Service {
         }
         return new Notification.Builder(this, "screen_stream")
                 .setContentTitle("Screen stream")
-                .setContentText("Raw frames on 127.0.0.1:" + PORT)
+                .setContentText("Raw frames on 127.0.0.1:" + PORT + ", video on "
+                        + EncodedStream.PORT)
                 .setSmallIcon(android.R.drawable.presence_video_online)
                 .build();
     }
@@ -789,6 +888,16 @@ public final class ScreenStream extends Service {
         Recorder ending = detachRecording();
         if (ending != null) {
             finishRecording(ending);
+        }
+        EncodedStream viewers = encoded;
+        encoded = null;
+        if (viewers != null) {
+            viewers.close();
+        }
+        Recorder live = streamEncoder;
+        streamEncoder = null;
+        if (live != null) {
+            live.stop();
         }
         if (reader != null) {
             reader.close();

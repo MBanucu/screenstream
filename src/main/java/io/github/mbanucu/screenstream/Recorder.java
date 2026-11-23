@@ -5,12 +5,15 @@ import android.media.MediaCodec;
 import android.media.MediaCodecInfo;
 import android.media.MediaFormat;
 import android.media.MediaMuxer;
+import android.os.Bundle;
 import android.util.Log;
 
 import java.io.File;
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.util.List;
 import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -52,11 +55,15 @@ final class Recorder {
     private static final long DRAIN_MS = 5000;
 
     private final MediaCodec codec;
+    /** Null when this encoder exists only to feed the live stream, not a file. */
     private final MediaMuxer muxer;
     private final File file;
     private final int width, height;
     private final Thread worker;
     private final ArrayBlockingQueue<ScreenStream.Frame> queue = new ArrayBlockingQueue<>(QUEUE);
+    /** Consumers of the encoded samples besides the file; see {@link Sink}. */
+    private final List<Sink> sinks = new CopyOnWriteArrayList<>();
+    private volatile MediaFormat outputFormat;
 
     private volatile boolean ending;
     private volatile boolean closed;
@@ -67,7 +74,25 @@ final class Recorder {
     private boolean started;
     private long baseUs = -1;
 
-    /** Starts encoding into {@code file}; the caller owns {@link #stop()}. */
+    /**
+     * Something else that wants the encoded samples: the live stream is one.
+     *
+     * <p>It sees exactly what the file gets - same frames, same timestamps - so a
+     * viewer and the recording cannot disagree about what the screen showed. The
+     * buffer passed to {@link #sample} is the encoder's and is only borrowed: a sink
+     * that keeps anything copies it.
+     */
+    interface Sink {
+        /** Called once, before the first sample, with the encoder's actual format. */
+        void format(MediaFormat format);
+
+        void sample(ByteBuffer buffer, MediaCodec.BufferInfo info);
+    }
+
+    /**
+     * Starts encoding; {@code file} may be null, which makes it a live encoder with
+     * no archive. The caller owns {@link #stop()}.
+     */
     static Recorder start(File file, int width, int height) throws IOException {
         MediaFormat format = MediaFormat.createVideoFormat(MIME, width, height);
         format.setInteger(MediaFormat.KEY_COLOR_FORMAT,
@@ -81,8 +106,9 @@ final class Recorder {
         format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, I_FRAME_SECONDS);
         MediaCodec codec = MediaCodec.createEncoderByType(MIME);
         codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
-        MediaMuxer muxer = new MediaMuxer(file.getAbsolutePath(),
-                MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
+        MediaMuxer muxer = file == null ? null
+                : new MediaMuxer(file.getAbsolutePath(),
+                        MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
         Recorder recorder = new Recorder(codec, muxer, file, width, height);
         codec.start();
         recorder.worker.start();
@@ -100,6 +126,47 @@ final class Recorder {
 
     File file() {
         return file;
+    }
+
+    /** The encoder component in use, e.g. c2.mtk.avc.encoder for the hardware one. */
+    String codecName() {
+        return codec.getName();
+    }
+
+    /** The encoder's format, or null until it has produced one. */
+    MediaFormat format() {
+        return outputFormat;
+    }
+
+    void addSink(Sink sink) {
+        if (sink != null && !sinks.contains(sink)) {
+            sinks.add(sink);
+            MediaFormat known = outputFormat;
+            if (known != null) {
+                sink.format(known);
+            }
+        }
+    }
+
+    void removeSink(Sink sink) {
+        sinks.remove(sink);
+    }
+
+    /**
+     * Asks the encoder for a keyframe now.
+     *
+     * <p>A viewer that attaches mid-stream cannot decode anything until one arrives,
+     * and waiting for the periodic one would show a blank screen for up to two
+     * seconds. Safe to call from any thread; a codec that has stopped ignores it.
+     */
+    void requestSync() {
+        try {
+            Bundle parameters = new Bundle();
+            parameters.putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0);
+            codec.setParameters(parameters);
+        } catch (RuntimeException ignored) {
+            // Stopped or broken: the next viewer will attach to a new encoder.
+        }
     }
 
     /**
@@ -265,9 +332,7 @@ final class Recorder {
                 return;
             }
             if (index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
-                track = muxer.addTrack(codec.getOutputFormat());
-                muxer.start();
-                started = true;
+                announce(codec.getOutputFormat());
                 continue;
             }
             if (index < 0) {
@@ -283,13 +348,31 @@ final class Recorder {
         }
     }
 
+    /** Puts the encoder's format where the file and every sink can see it. */
+    private void announce(MediaFormat format) {
+        outputFormat = format;
+        if (muxer != null) {
+            track = muxer.addTrack(format);
+            muxer.start();
+            started = true;
+        }
+        for (Sink sink : sinks) {
+            sink.format(format);
+        }
+    }
+
     private void write(int index, MediaCodec.BufferInfo info) {
         ByteBuffer buffer = codec.getOutputBuffer(index);
-        if (buffer == null || track < 0 || info.size <= 0
+        if (buffer == null || info.size <= 0
                 || (info.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) {
             return;
         }
-        muxer.writeSampleData(track, buffer, info);
+        if (track >= 0) {
+            muxer.writeSampleData(track, buffer, info);
+        }
+        for (Sink sink : sinks) {
+            sink.sample(buffer, info);
+        }
         frames++;
         lastUs = info.presentationTimeUs;
     }
@@ -309,9 +392,7 @@ final class Recorder {
         while (System.currentTimeMillis() < deadline) {
             int index = codec.dequeueOutputBuffer(info, 10_000);
             if (index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
-                track = muxer.addTrack(codec.getOutputFormat());
-                muxer.start();
-                started = true;
+                announce(codec.getOutputFormat());
                 continue;
             }
             if (index < 0) {
@@ -343,6 +424,9 @@ final class Recorder {
             // A codec that already failed does not need stopping.
         }
         codec.release();
+        if (muxer == null) {
+            return;
+        }
         // The muxer writes the MP4 index in stop(); without it the file is samples
         // with no way to seek, so this is the part that makes it a video.
         if (started) {

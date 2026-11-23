@@ -105,6 +105,12 @@ recorded_frames=         frames written to it (or to the last one)
 recorded_ms=             its length so far, from the last frame written
 recording_from_ns=       the file's zero on the stream's clock: a frame's
                          timestamp minus this is where its picture is in it
+encoded_port=            the encoded stream's port, or - when it is not serving
+encoded_clients=         viewers attached to it
+encoded_frames=          samples the encoder produced for them
+encoded_bytes=           bytes written to all of them together
+encoder=                 the encoder component in use, e.g. c2.mtk.avc.encoder
+                         for the phone's hardware one, or - when none is running
 ```
 
 ## Recording to a file
@@ -139,6 +145,48 @@ and the file kept 390 of them (137 s, 2.8 frames a second): readable, and choppy
 the way a busy screen at native size is. The conversion is where the time goes,
 so a half-size recording is the obvious lever - a quarter of the pixels - though
 it is not measured yet.
+
+## Watching it live: the encoded stream
+
+The raw socket is the display itself: at 1440x3200 a changed frame is 18 MB, which
+is right for a machine on the far end of a cable and useless for anything else. So
+there is a second port, **7101**, carrying the same frames as **H.264 in a
+fragmented MP4** — a hundredth of a percent of the bytes, with the screen's own
+variable frame rate kept because the encoder is fed the frames' timestamps.
+
+```bash
+adb shell am start -n io.github.mbanucu.screenstream.app/io.github.mbanucu.screenstream.ScreenStreamActivity
+python3 client/fmp4.py --seconds 10 --out out/live.mp4     # 127.0.0.1:7101
+ffplay out/live.mp4
+```
+
+From a machine other than the phone, forward the port to a free local one, for the
+same reason as above: `adb forward tcp:7201 tcp:7101`.
+
+- **One encoder, two consumers.** A viewer and the recording are fed by the same
+  `MediaCodec` instance, so they cannot show different pictures — the file and the
+  stream are the same capture. With no recording running, an encoder is started for
+  the viewers, and it stops when the last one leaves: `encoder=-` in the status file
+  is what nobody watching looks like.
+- **A fragment is playable as it arrives.** A plain MP4 only becomes readable when
+  its index is written at the end, which is why the recording is an archive and not
+  a live view. Here the index (`moov` + `mvex`) is in the init segment and every
+  `moof` carries its own; `ffprobe`, VLC and `ffplay` read the file as it grows.
+- **A viewer gets a keyframe.** Attaching requests a sync frame from the encoder and
+  the viewer's fragments start there, instead of waiting up to the two-second
+  interval. Fragments also close after a second, so a quiet screen does not hold
+  the last pictures back.
+- **The encoder is the phone's hardware one** where there is one:
+  `c2.mtk.avc.encoder` on this device (H.264, up to 3840x2176). There is no hardware
+  VP8 or VP9 here — `c2.android.vp8.encoder` is a software component capped at
+  2048x2048 — which is why the encoded side is H.264 and not WebM.
+
+Measured on this phone, 1440x3200: a 10 s capture of scrolling came to 1.0 MB in 36
+frames (about 0.8 Mbps), a 12 s capture of the notification shade opening and
+closing came to 9.2 MB (about 6 Mbps) because large areas repainted every frame,
+and both decode to real screenshots. That is the range to plan for: tens of
+kilobytes a second on a quiet screen, a few megabits on a busy one, against 155 MB/s
+for the raw socket.
 
 ## Twitch, and what streaming still needs
 
