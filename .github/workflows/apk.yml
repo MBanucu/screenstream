@@ -101,9 +101,12 @@ jobs:
           apksigner verify --print-certs out/screenstream-app.apk | sed -n '1,3p' \
             | tee -a "$GITHUB_STEP_SUMMARY"
           # A downloaded file says which release it is, like the tag does.
-          apk="out/screenstream-$version.apk"
-          cp out/screenstream-app.apk "$apk"
-          sha256sum "$apk" > "$apk.sha256"
+          cp out/screenstream-app.apk "out/screenstream-$version.apk"
+          # Written from inside out/ so the checksum names the file alone, and
+          # `sha256sum -c screenstream-<version>.apk.sha256` works in a downloads
+          # directory where both files sit side by side.
+          ( cd out && sha256sum "screenstream-$version.apk" \
+              > "screenstream-$version.apk.sha256" )
 
       - name: Attach to the release
         env:
