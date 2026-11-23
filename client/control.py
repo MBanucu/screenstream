@@ -2,6 +2,7 @@
 """Drive screenstream's control surface from a host, over adb.
 
     python3 client/control.py status
+    python3 client/control.py grant
     python3 client/control.py start --port 0 --encoded-port 0
     python3 client/control.py record
     python3 client/control.py recording
@@ -12,7 +13,10 @@ The provider replies with a Bundle whose ``code`` is 0 for a successful call and
 per field. ``content call`` prints that Bundle; :func:`parse_result` keeps the
 parsing in one place so a test suite can reuse it. ``start`` is synchronous: it
 returns ``state=streaming`` and the bound port after the first composited frame,
-or ``code=400`` and ``state=failed`` with a ``why`` line.
+or ``code=400`` and ``state=failed`` with a ``why`` line. A projection that was
+never granted is ``state=waiting_for_grant`` with ``reason=dialog`` and the
+``command`` that grants it; ``grant=yes|no|unknown`` is on every status and start
+reply, so a harness can fail before recording a black video.
 """
 
 from __future__ import annotations
@@ -25,7 +29,11 @@ import sys
 from typing import Iterable, Sequence
 
 AUTHORITY = "content://io.github.mbanucu.screenstream.control"
-METHODS = ("status", "start", "stop", "record", "recording")
+METHODS = ("status", "grant", "start", "stop", "record", "recording")
+
+# grant=yes means a projection would start without a dialog; no means it asks;
+# unknown means the platform could not be asked. Absent is unknown too.
+_GRANTED = {"yes": True, "no": False, "unknown": None}
 
 # `content call` prints `Result: Bundle[{code=0, data=...}]`; the data's newlines
 # are literal, so the match has to span them.
@@ -72,6 +80,16 @@ def parse_result(text: str) -> Reply:
     if not match:
         raise ControlError("no Result: Bundle in %r" % text.strip()[:500])
     return Reply(int(match.group(1)), match.group(2))
+
+
+def granted(reply: Reply) -> bool | None:
+    """True for ``grant=yes``, False for ``grant=no``, None for unknown or absent."""
+    return _GRANTED.get(reply.fields.get("grant", "unknown"), None)
+
+
+def waiting_for_grant(reply: Reply) -> bool:
+    """Whether a start returned because the projection grant is the missing piece."""
+    return reply.fields.get("state") == "waiting_for_grant"
 
 
 def command(method: str, serial: str | None = None,

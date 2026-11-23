@@ -35,12 +35,14 @@ encoded_clients=0
 encoded_frames=0
 encoded_bytes=0
 encoder=-
+grant=yes
+grant_route=appop
 """
 
 REQUIRED = (
     "state", "port", "encoded_port", "frames_looked", "frames_changed",
     "frames_sent", "frames_skipped", "recording", "recorded_frames",
-    "recording_from_ns",
+    "recording_from_ns", "grant", "grant_route",
 )
 
 
@@ -54,6 +56,8 @@ class ParseTests(unittest.TestCase):
         self.assertEqual("43127", reply["port"])
         self.assertEqual("43128", reply["encoded_port"])
         self.assertEqual("-", reply["recording"])
+        self.assertEqual("yes", reply["grant"])
+        self.assertEqual("appop", reply["grant_route"])
 
     def test_all_status_keys_survive_the_round_trip(self):
         reply = control.parse_result(
@@ -83,6 +87,74 @@ class ParseTests(unittest.TestCase):
             control.parse_result("Error: Unknown URI content://elsewhere\n")
 
 
+class GrantTests(unittest.TestCase):
+    def reply(self, data, code=0):
+        return control.parse_result("Result: Bundle[{code=" + str(code)
+                                    + ", data=" + data + "}]")
+
+    def test_appop_route_is_a_grant(self):
+        reply = self.reply("state=streaming\nport=43127\n"
+                           "grant=yes\ngrant_route=appop\n")
+        self.assertTrue(control.granted(reply))
+        self.assertEqual("appop", reply["grant_route"])
+        self.assertFalse(control.waiting_for_grant(reply))
+
+    def test_no_grant_names_the_dialog_and_the_command(self):
+        data = ("grant=no\n"
+                "grant_route=none\n"
+                "package=io.github.mbanucu.screenstream.app\n"
+                "reason=dialog\n"
+                "command=adb shell appops set io.github.mbanucu.screenstream.app "
+                "PROJECT_MEDIA allow\n"
+                "revoke_command=adb shell appops set io.github.mbanucu.screenstream.app "
+                "PROJECT_MEDIA default\n")
+        reply = self.reply(data)
+        self.assertFalse(control.granted(reply))
+        self.assertEqual("none", reply["grant_route"])
+        self.assertEqual("dialog", reply["reason"])
+        self.assertIn("PROJECT_MEDIA allow", reply["command"])
+        self.assertIn("PROJECT_MEDIA default", reply["revoke_command"])
+
+    def test_waiting_for_grant_never_claims_streaming(self):
+        data = ("state=waiting_for_grant\n"
+                "why=no capture started\n"
+                "port=0\n"
+                "reason=dialog\n"
+                "grant=no\n"
+                "grant_route=none\n"
+                "command=adb shell appops set p PROJECT_MEDIA allow\n"
+                "fallback=accept the system dialog on the device\n")
+        reply = self.reply(data, 400)
+        self.assertEqual(400, reply.code)
+        self.assertEqual("waiting_for_grant", reply["state"])
+        self.assertNotEqual("streaming", reply["state"])
+        self.assertTrue(control.waiting_for_grant(reply))
+        self.assertFalse(control.granted(reply))
+        self.assertIn("appops set", reply["command"])
+
+    def test_unknown_and_absent_grants_are_none(self):
+        self.assertIsNone(control.granted(self.reply("grant=unknown\n")))
+        self.assertIsNone(control.granted(self.reply("state=stopped\n")))
+
+    def test_waiting_for_grant_is_no_grant_even_when_the_appop_is_allowed(self):
+        data = ("state=waiting_for_grant\n"
+                "reason=dialog\n"
+                "grant=no\n"
+                "grant_route=dialog\n"
+                "appop=yes\n"
+                "detail=the app-op is allowed, but this platform still asked\n")
+        reply = self.reply(data, 400)
+        self.assertTrue(control.waiting_for_grant(reply))
+        self.assertFalse(control.granted(reply))
+        self.assertEqual("yes", reply["appop"])
+        self.assertEqual("dialog", reply["grant_route"])
+
+    def test_dialog_route_after_a_grant_is_still_granted(self):
+        reply = self.reply("state=streaming\ngrant=yes\ngrant_route=dialog\n")
+        self.assertTrue(control.granted(reply))
+        self.assertEqual("dialog", reply["grant_route"])
+
+
 class FieldTests(unittest.TestCase):
     def test_value_keeps_equals_and_colons(self):
         fields = control.parse_fields(
@@ -107,6 +179,12 @@ class CommandTests(unittest.TestCase):
             ["adb", "shell", "content", "call", "--uri", control.AUTHORITY,
              "--method", "status"],
             control.command("status"))
+
+    def test_grant_command_has_no_extras(self):
+        self.assertEqual(
+            ["adb", "shell", "content", "call", "--uri", control.AUTHORITY,
+             "--method", "grant"],
+            control.command("grant"))
 
     def test_start_extras_are_typed_and_ordered(self):
         extras = control.start_extras(0, 0, 2, 5000)

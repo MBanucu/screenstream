@@ -95,11 +95,14 @@ import java.util.concurrent.atomic.AtomicInteger;
  * <h2>Using it from another project</h2>
  *
  * <p>Two things have to happen outside this class, both of them an app's own
- * business: someone grants the capture, and the phone's app-op is left alone. The
- * grant is a {@link MediaProjection} token, which only the system dialog issues;
- * {@link ScreenStreamActivity} asks for it, and {@link #setDialogClicker} is how
- * something standing in for a person - an accessibility service, say - accepts
- * the dialog. The activity is started by component:
+ * business: the capture is granted, and the phone's app-op is left alone by
+ * anything shipped. The grant is a {@link MediaProjection} token, which the
+ * system dialog issues; on a test device the {@code PROJECT_MEDIA} app-op can
+ * replace the dialog. {@link Grant} reports which one is in force - it reads the
+ * op and never sets it - and {@link ScreenStreamActivity} asks for the token.
+ * {@link #setDialogClicker} is how something standing in for a person - an
+ * accessibility service, say - accepts the dialog. The activity is started by
+ * component:
  *
  * <pre>
  * adb shell am start -n your.package/io.github.mbanucu.screenstream.ScreenStreamActivity
@@ -169,6 +172,10 @@ public final class ScreenStream extends Service {
     private static volatile File lastFinishedRecording;
     private static long frameNumber;
     private static volatile Runnable dialogClicker;
+    /** How the current (or last) capture was granted: appop, dialog or unknown. */
+    private static volatile String grantRoute;
+    /** True when a dialog was refused or is still waiting, not a hard failure. */
+    private static volatile boolean grantPending;
     private long previousSignature;
     private long looked, changed, skipped, sent;
     private long lastStatus;
@@ -315,11 +322,37 @@ public final class ScreenStream extends Service {
     /** Clears a previous start's failure before a new one is asked for. */
     static void clearStartFailure() {
         lastFailure = null;
+        grantPending = false;
     }
 
     /** Records a failure outside the service, e.g. a dialog that was not accepted. */
     static void noteStartFailure(String why) {
         lastFailure = why;
+    }
+
+    /**
+     * Says the projection dialog was refused or is still unanswered.
+     *
+     * <p>That is not the same as a capture that failed: the grant is the missing
+     * piece, and a caller can supply it with an app-op or by answering the dialog.
+     * The control surface reports this as {@code state=waiting_for_grant} rather
+     * than {@code state=failed}.
+     */
+    static void noteGrantPending() {
+        grantPending = true;
+    }
+
+    static boolean grantPending() {
+        return grantPending;
+    }
+
+    /** How the current (or last) capture was granted: appop, dialog or unknown. */
+    static String grantRoute() {
+        return grantRoute;
+    }
+
+    static void noteGrantRoute(String route) {
+        grantRoute = route;
     }
 
     /** True once the service has finished stopping, including a recording's index. */
@@ -347,6 +380,17 @@ public final class ScreenStream extends Service {
     /** A full report for a start that never became a capture. */
     static String failureReport(int requestedPort, String why) {
         return idleReport("failed", why, requestedPort);
+    }
+
+    /**
+     * A report for a start whose missing piece is the projection grant.
+     *
+     * <p>Only the control surface writes this state: it is an answer to one call,
+     * with the command that would grant the projection beside it, not a new key in
+     * the state file.
+     */
+    static String waitingReport(int requestedPort, String why) {
+        return idleReport("waiting_for_grant", why, requestedPort);
     }
 
     private static String idleReport(String state, String why, int port) {
@@ -1101,6 +1145,8 @@ public final class ScreenStream extends Service {
             client.close();
         }
         status("stopped");
+        // A route belongs to the capture it granted; the next one records its own.
+        grantRoute = null;
         running = false;
         super.onDestroy();
     }
