@@ -20,10 +20,12 @@ a picture of it.
 
 ## The wire format
 
-Every frame is a 36-byte big-endian header, then its pixels:
+Every frame is a 40-byte big-endian header, then its pixels:
 
 ```
-magic "RAW1"   4 bytes
+magic "RAW2"   4 bytes
+major          u16   protocol major version, 2 today
+minor          u16   protocol minor version
 width          u32
 height         u32
 row stride     u32   bytes per row in the payload, padding included
@@ -31,6 +33,13 @@ format         u32   1 = RGBA_8888, 4 bytes per pixel
 frame number   u64   changed frames since the capture began
 timestamp      u64   nanoseconds, the device's elapsed clock
 ```
+
+The **major version is the compatibility rule**: a 2.x stream keeps this
+layout, and a client refuses another major with a sentence that names both
+versions, before it reads fields that may have moved. Protocol 1 was the
+36-byte `RAW1` header an app built before the version served; the Python client
+still accepts it, and new streams are always `RAW2`. The state file carries the
+same version as `protocol=2.0`.
 
 Three properties are deliberate, and they are what make this usable as a test
 source rather than a screencast:
@@ -48,6 +57,48 @@ source rather than a screencast:
 
 A slow consumer loses its own frames (newest wins) and is disconnected if it
 stalls for two seconds; it never slows the screen down.
+
+## The Python client
+
+`client/` is the installable `screenstream-client` distribution. It has no
+runtime dependencies beyond the standard library; ffmpeg is used only when a
+frame is written as a PNG.
+
+```bash
+pip install screenstream-client
+# or, from a checkout, without installing:
+python3 client/stream.py --port 7200 --seconds 5 --png out/stream
+
+screenstream-stream --port 7200 --seconds 5 --frames-dir out/stream
+screenstream-fmp4 --seconds 10 --out out/live.mp4
+```
+
+The commands keep the flags of the scripts they replace: `screenstream-stream`
+takes `--host`, `--port`, `--frames`, `--seconds`, `--frames-dir`/`--png` and
+`--quiet`; `screenstream-fmp4` takes `--host`, `--port`, `--seconds` and
+`--out`. `python3 client/stream.py` and `python3 client/fmp4.py` remain thin
+wrappers over the same code.
+
+As a library:
+
+```python
+from screenstream_client import connect, read_fmp4, save_png
+
+with connect("127.0.0.1", 7100) as link:
+    frame = link.wait_for_change(5.0)        # None when a still screen sends nothing
+    print(frame.number, frame.timestamp_ns, frame.size)
+    save_png(frame, "out/frame.png")
+
+    for number, timestamp_ns, size, pixels in link.frames():
+        ...
+```
+
+`connect(host, port)` retries while the capture is starting and returns a
+connection; `frames()` yields `(number, timestamp_ns, size, pixels)` until the
+source closes; `wait_for_change(timeout, since=frame_number)` returns the next
+frame or `None`; `read_fmp4(source)` yields the complete boxes of an init
+segment or a saved file. An unknown protocol major raises a `ProtocolError`
+whose message is a sentence.
 
 ## As an app, for adb access
 
@@ -153,6 +204,7 @@ state file's vocabulary:
 ```
 Result: Bundle[{code=0, data=state=streaming
 port=43127
+protocol=2.0
 encoded_port=43128
 frames_looked=8
 frames_changed=3
@@ -164,7 +216,7 @@ grant_route=appop
 }]
 ```
 
-`status` includes at least `state`, `port`, `encoded_port`, `frames_looked`,
+`status` includes at least `state`, `port`, `protocol`, `encoded_port`, `frames_looked`,
 `frames_changed`, `frames_sent`, `frames_skipped`, `recording`,
 `recorded_frames`, `recording_from_ns`, `grant` and `grant_route`. `record`
 starts an MP4 in the app's `recordings/` directory and replies with its path in
@@ -310,6 +362,7 @@ variable frame rate kept because the encoder is fed the frames' timestamps.
 ```bash
 adb shell am start -n io.github.mbanucu.screenstream.app/io.github.mbanucu.screenstream.ScreenStreamActivity
 python3 client/fmp4.py --seconds 10 --out out/live.mp4     # 127.0.0.1:7101
+# or, once installed: screenstream-fmp4 --seconds 10 --out out/live.mp4
 ffplay out/live.mp4
 ```
 
@@ -434,19 +487,26 @@ screen should sample the screen itself once and label what it saw with
 
 The socket is the language-agnostic edge, and for most frameworks it is all they
 need: connect, read a header, read `stride * height` bytes, decide, repeat.
-`client/stream.py` is a reference consumer in about 150 lines — the protocol is
-deliberately small enough to re-implement in any language a test harness is
-written in.
+`client/screenstream_client` is the reference consumer, packaged so a harness
+can import it; the protocol stays deliberately small enough to re-implement in
+any language a test harness is written in.
 
 - **Host-side tests** (anything driving the phone over adb): `content call` to the
   control provider for a synchronous start and the bound port, then `adb forward`
   and connect to that port; no Android dependency at all. `client/control.py`
   parses the reply, and `test/test_control.py` checks that parsing without a phone.
+- **Offline wire tests**: `test/test_client.py` and `test/test_fmp4.py` build
+  frames and a fragmented MP4 in memory and cover a frame split across TCP
+  reads, two frames in one read, a zero-length or partial header, a truncated
+  fragment, the `base_ns` box, and the protocol-version refusal. They run in CI
+  with every other test: `python3 -m unittest discover -s test -v`.
 - **On-device tests** (instrumentation, an Espresso-like framework): depend on the
   AAR and `subscribe` in-process, so a frame costs no socket and no copy.
-- **Assertions about time**: `frame.number` and `frame.timestampNs` line up with
+- **Assertions about time**: `frame.number` and `frame.timestamp_ns` line up with
   `screenrecord`'s metadata track and with `dumpsys`, so a check that passes on
-  frame *n* can name the picture of frame *n*.
+  frame *n* can name the picture of frame *n*. `test/test_device_wire.py` is an
+  optional, clearly marked device check of one frame's size and timestamp; it is
+  skipped unless `SCREENSTREAM_DEVICE=1` and is not run by CI.
 
 ## Two builds
 
@@ -467,13 +527,15 @@ differently, and the Gradle AAR carries `aar-metadata.properties`.
 
 `./gradlew` is checked in, so a machine with nothing but a JDK can build it: the
 wrapper downloads Gradle 9.9.2 itself. There is also CI — `.github/workflows/ci.yml`
-builds both ways on ubuntu and then fails if the two artifacts expose different
-APIs (compared with `javap`, not by trusting that they compile), and
-`.github/workflows/release.yml` publishes a release. That one runs `publish.sh`
-itself rather than a second publishing path, given the four secrets
+runs the host-side tests (control, wire format and fMP4), installs the client and
+checks both console scripts, builds both ways on ubuntu and then fails if the two
+artifacts expose different APIs (compared with `javap`, not by trusting that they
+compile). `.github/workflows/release.yml` publishes a release. Its Maven job runs
+`publish.sh` itself rather than a second publishing path, given the four secrets
 `SIGNING_KEY`, `SIGNING_PASSWORD`, `MAVEN_CENTRAL_USERNAME`,
 `MAVEN_CENTRAL_PASSWORD` — which do not exist in this repository yet, so the
-first release run stops at the step that checks for them.
+first release run stops at the step that checks for them. Its PyPI job publishes
+the client with trusted publishing, described under "Publishing: PyPI" above.
 
 What Gradle adds is what a publication wants rather than what a build needs:
 module metadata (`.module`, which is how a Gradle consumer resolves the AAR without
@@ -549,6 +611,36 @@ metadata (`.module`); this bundle has only the POM, whose `packaging` is `aar` �
 a Gradle consumer may need the explicit `@aar` in the dependency, as shown above.
 And JitPack still builds from a tag with Gradle, which this repository deliberately
 does not use, so JitPack is not a route here.
+
+## Publishing: PyPI, for the client
+
+The client and the AAR are one release with one version. `client/pyproject.toml`
+carries the same number as `build.gradle.kts` and `build.sh`;
+`test/test_client.py` fails if they disagree, and the release workflow refuses a
+tag whose version is not the one in `pyproject.toml`. The three files and the tag
+move together, so a release has one number for the AAR, the APK and
+`screenstream-client`, not three independent versions.
+
+```bash
+pip install -e client              # from a checkout, for development
+python3 -m build client --outdir dist
+```
+
+The `pypi` job in `.github/workflows/release.yml` uses PyPI **trusted
+publishing**, so there is no token secret: it builds `client/` and uploads the
+wheel and sdist with `pypa/gh-action-pypi-publish`. Two pieces of setup live
+outside this repository and cannot be verified from a checkout:
+
+- A trusted publisher on PyPI for the project `screenstream-client`: owner
+  `MBanucu`, repository `screenstream`, workflow `release.yml`, environment
+  `pypi`.
+- An environment named `pypi` in the repository's settings; the job names it so
+  a release can require approval before it uploads.
+
+Until those exist the `pypi` job fails at the upload, after the Maven and APK
+jobs have done their own work. That is deliberate: it is better than storing a
+PyPI token as a secret or uploading from an unverified identity, and the
+version check happens before anything is built.
 
 ## Releasing the app: the APK on GitHub
 

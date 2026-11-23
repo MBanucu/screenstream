@@ -76,10 +76,11 @@ import java.util.concurrent.atomic.AtomicInteger;
  * python3 test/stream.py --frames 3
  * </pre>
  *
- * <p>Every frame starts with a 36-byte big-endian header, then its pixels:
+ * <p>Every frame starts with a 40-byte big-endian header, then its pixels:
  *
  * <pre>
- *   magic "RAW1"   4 bytes
+ *   magic "RAW2"   4 bytes
+ *   protocol       u16 major, u16 minor: 2.0 today
  *   width          u32
  *   height         u32
  *   row stride     u32   bytes per row in the payload, padding included
@@ -87,6 +88,11 @@ import java.util.concurrent.atomic.AtomicInteger;
  *   frame number   u64   changed frames since the capture began
  *   timestamp      u64   nanoseconds, the device's elapsed clock
  * </pre>
+ *
+ * <p>The version is in the header so a client can refuse a stream it does not
+ * understand with a sentence, before the fields it reads stop meaning what they
+ * did. The rule is the major number: 2.x is this layout. Protocol 1 was the
+ * 36-byte {@code RAW1} header an app built before the version served.
  *
  * <p>An app in the same process does not need the socket: {@link #subscribe}
  * hands it every changed frame, shared with the socket consumers, so it costs no
@@ -123,6 +129,11 @@ public final class ScreenStream extends Service {
 
     /** The default port; a start may name another one, or 0 for an ephemeral one. */
     public static final int PORT = 7100;
+    /** The wire protocol this build serves; a client refuses a different major. */
+    public static final int PROTOCOL_MAJOR = 2;
+    public static final int PROTOCOL_MINOR = 0;
+    /** The same version for readers of the state file, e.g. {@code protocol=2.0}. */
+    public static final String PROTOCOL_VERSION = PROTOCOL_MAJOR + "." + PROTOCOL_MINOR;
     public static final String ACTION_START = "io.github.mbanucu.screenstream.START";
     public static final String ACTION_STOP = "io.github.mbanucu.screenstream.STOP";
     public static final String EXTRA_RESULT = "result";
@@ -141,7 +152,7 @@ public final class ScreenStream extends Service {
     private static final long WRITE_DEADLINE_MS = 2000;
     /** Sample grid for "did the screen change": a caret is far bigger than this. */
     private static final int CHANGE_STEP = 8;
-    private static final int HEADER_BYTES = 4 + 4 * 4 + 8 * 2;
+    private static final int HEADER_BYTES = 4 + 2 + 2 + 4 * 4 + 8 * 2;
 
     private MediaProjection projection;
     private VirtualDisplay display;
@@ -400,6 +411,7 @@ public final class ScreenStream extends Service {
             out.append("why=").append(oneLine(why)).append('\n');
         }
         out.append("port=").append(port).append('\n');
+        out.append("protocol=").append(PROTOCOL_VERSION).append('\n');
         out.append("size=0x0\n");
         out.append("scale=1\n");
         out.append("format=rgba8888\n");
@@ -1009,7 +1021,8 @@ public final class ScreenStream extends Service {
 
         ByteBuffer header() {
             ByteBuffer header = ByteBuffer.allocate(HEADER_BYTES);
-            header.put((byte) 'R').put((byte) 'A').put((byte) 'W').put((byte) '1');
+            header.put((byte) 'R').put((byte) 'A').put((byte) 'W').put((byte) '2');
+            header.putShort((short) PROTOCOL_MAJOR).putShort((short) PROTOCOL_MINOR);
             header.putInt(width).putInt(height).putInt(stride).putInt(1);
             header.putLong(number).putLong(timestampNs);
             header.flip();
@@ -1036,6 +1049,7 @@ public final class ScreenStream extends Service {
             out.append("why=").append(oneLine(why)).append('\n');
         }
         out.append("port=").append(port).append('\n');
+        out.append("protocol=").append(PROTOCOL_VERSION).append('\n');
         out.append("size=").append(width).append('x').append(height).append('\n');
         out.append("scale=").append(scale).append('\n');
         out.append("format=rgba8888\n");
