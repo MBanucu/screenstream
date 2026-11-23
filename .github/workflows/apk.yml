@@ -1,0 +1,119 @@
+name: apk
+
+# Attaches a signed APK to a GitHub release, with its sha256 beside it.
+#
+# The key matters more than the upload: an APK signed with a key other than the
+# one that signed the installed app cannot be installed over it, so this uses a
+# single release key from the repository's secrets rather than the debug key a
+# build machine invents. Everything a user needs is on the release page: the APK,
+# its checksum, and the version code a package manager orders it by.
+#
+# Secrets (repository settings -> Secrets and variables -> Actions):
+#   RELEASE_KEYSTORE_BASE64  base64 of the release keystore, one line
+#   RELEASE_STORE_PASSWORD   that keystore's password (and its key's: PKCS12
+#                            keystores tie the two together)
+#   RELEASE_KEY_ALIAS        the key's alias inside it
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build and attach the APK to (for example v0.2.1)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    name: sign and attach the APK
+    runs-on: ubuntu-24.04
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Android SDK
+        run: |
+          sdk="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          manager=$(command -v sdkmanager || echo "$sdk/cmdline-tools/latest/bin/sdkmanager")
+          yes | "$manager" --licenses >/dev/null 2>&1 || true
+          "$manager" "platforms;android-35" "build-tools;35.0.0" >/dev/null
+          echo "ANDROID_HOME=$sdk" >>"$GITHUB_ENV"
+          # build.sh looks for aapt2, zipalign and apksigner on PATH.
+          echo "PATH=$sdk/build-tools/35.0.0:$PATH" >>"$GITHUB_ENV"
+
+      - name: The signing secrets are present
+        env:
+          KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+        run: |
+          missing=()
+          for name in KEYSTORE_BASE64 STORE_PASSWORD KEY_ALIAS; do
+            [ -n "${!name:-}" ] || missing+=("$name")
+          done
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::missing release secrets: ${missing[*]}"
+            echo "An APK signed with a different key than the installed app cannot"
+            echo "update it, so this job will not fall back to the debug key. See"
+            echo "README, 'Releasing the app'."
+            exit 1
+          fi
+
+      - name: The release key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+          [ -s "$RUNNER_TEMP/release.jks" ] || { echo "::error::the keystore decoded to nothing"; exit 1; }
+
+      - name: Build and sign
+        env:
+          KEYSTORE: ${{ runner.temp }}/release.jks
+          KEYSTORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          # Tags are written v0.2.1 as often as 0.2.1; the artifact version is not.
+          version="${TAG#v}"
+          # 0.2.1 -> 201, so a package manager can order two releases. A patch
+          # number past 99 would collide, and is refused rather than guessed at.
+          IFS=. read -r major minor patch <<<"$version"
+          if ! [[ "${major:-}" =~ ^[0-9]+$ && "${minor:-}" =~ ^[0-9]+$ && "${patch:-}" =~ ^[0-9]+$ ]] \
+              || [ "$minor" -gt 99 ] || [ "$patch" -gt 99 ]; then
+            echo "::error::$TAG is not major.minor.patch with minor and patch under 100"
+            exit 1
+          fi
+          version_code=$((major * 10000 + minor * 100 + patch))
+          echo "version $version, code $version_code" | tee -a "$GITHUB_STEP_SUMMARY"
+          VERSION="$version" VERSION_CODE="$version_code" bash build.sh apk
+          apksigner verify --print-certs out/screenstream-app.apk | sed -n '1,3p' \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+          sha256sum out/screenstream-app.apk > out/screenstream-app.apk.sha256
+
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # --clobber so re-running a failed job replaces its own artifact rather
+          # than failing on the file it attached before.
+          gh release upload "$TAG" out/screenstream-app.apk \
+            out/screenstream-app.apk.sha256 --clobber
+          {
+            echo "### screenstream app $TAG"
+            echo '```'
+            cat out/screenstream-app.apk.sha256
+            echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"

@@ -395,6 +395,54 @@ a Gradle consumer may need the explicit `@aar` in the dependency, as shown above
 And JitPack still builds from a tag with Gradle, which this repository deliberately
 does not use, so JitPack is not a route here.
 
+## Releasing the app: the APK on GitHub
+
+The app is not a Maven artifact, so its download is a GitHub release asset: the
+workflow `.github/workflows/apk.yml` builds the APK for the tag being released,
+signs it, and attaches it with a `sha256` beside it.
+
+```bash
+git tag -a v0.2.1 -m "screenstream 0.2.1"
+git push origin v0.2.1
+gh release create v0.2.1 --title "screenstream 0.2.1" --notes "..."   # the job follows
+# or, for a release that already exists: gh workflow run apk -f tag=v0.2.1
+```
+
+**The signing key is the part that matters.** Android refuses to install an APK
+signed with a different key over an installed app, so a release signed with a
+debug key can never update the app it shipped: one key is generated once, kept
+offline, and its keystore is in the repository's secrets. Three of them, in
+settings → Secrets and variables → Actions:
+
+| secret | what it is |
+|---|---|
+| `RELEASE_KEYSTORE_BASE64` | `base64 -w0 release.jks`, one line |
+| `RELEASE_STORE_PASSWORD` | that keystore's password, and its key's |
+| `RELEASE_KEY_ALIAS` | the key's alias, `screenstream` below |
+
+```bash
+keytool -genkeypair -keystore release.jks -storetype PKCS12 \
+    -storepass "$STORE_PASSWORD" -keypass "$STORE_PASSWORD" \
+    -alias screenstream -keyalg RSA -keysize 4096 -validity 10000 \
+    -dname 'CN=screenstream,O=MBanucu,C=DE'
+base64 -w0 release.jks > release.jks.b64
+```
+
+A PKCS12 keystore ties the key's password to the store's, which is why there is
+one secret for both. Keep `release.jks` somewhere it survives this repository: a
+lost key means no future release can update an install, only replace it.
+
+`versionCode` is derived from the tag — `v0.2.1` becomes `201`
+(`major*10000 + minor*100 + patch`) — because a package manager orders updates by
+that integer, and the app had none. A tag that is not `major.minor.patch`, or
+whose minor or patch is past 99, fails the job instead of inventing a code.
+
+A local `bash build.sh apk` is unchanged and still signs with this machine's
+debug key; `KEYSTORE`, `KEYSTORE_PASSWORD`, `KEY_ALIAS` and `VERSION_CODE` are
+what the release job passes to sign with the real one. The first release-signed
+APK cannot install over an install from `build.sh` — uninstall once, then updates
+work.
+
 ## Consent
 
 Capturing the display is not a permission an app can hold: the system asks every

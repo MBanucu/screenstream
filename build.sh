@@ -8,6 +8,16 @@
 #   bash build.sh apk          # app: out/screenstream-app.apk, installable and driven by adb
 #   VERSION=0.2.0 bash build.sh
 #
+# The APK is signed with the debug key unless a release key is given; a released
+# APK has to be signed with the same key as the one it updates, so a release job
+# passes all four of these and a local build passes none of them:
+#
+#   KEYSTORE           path to the keystore (default ~/.android/debug.keystore)
+#   KEYSTORE_PASSWORD  its store password (default "android")
+#   KEY_ALIAS          the key inside it (default androiddebugkey)
+#   KEY_PASSWORD       that key's password (default "android")
+#   VERSION_CODE       the integer a package manager orders releases by (default 1)
+#
 # The artifacts, and what each is for:
 #
 #   .aar          an Android app or test framework: classes.jar, the manifest with
@@ -26,6 +36,7 @@ set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 mode=${1:-library}
 version=${VERSION:-0.2.0}
+version_code=${VERSION_CODE:-1}
 sources=$here/src/main/java
 
 sdk=""
@@ -92,7 +103,7 @@ if [ "$mode" = apk ]; then
         -I "$android_jar" \
         --manifest "$here/app/AndroidManifest.xml" \
         --min-sdk-version 24 --target-sdk-version "$api" \
-        --version-code 1 --version-name "$version"
+        --version-code "$version_code" --version-name "$version"
 
     echo "== screenstream app: package =="
     python3 - "$work/base.apk" "$work/dex/classes.dex" "$work/unaligned.apk" <<'EOF'
@@ -105,12 +116,23 @@ with zipfile.ZipFile(base) as src, zipfile.ZipFile(out, 'w') as dst:
 EOF
 
     zipalign -f 4 "$work/unaligned.apk" "$work/aligned.apk"
-    keystore=$HOME/.android/debug.keystore
-    [ -f "$keystore" ] || keytool -genkeypair -keystore "$keystore" -storepass android \
-        -keypass android -alias androiddebugkey -keyalg RSA -keysize 2048 \
-        -validity 10000 -dname 'CN=Android Debug,O=Android,C=US' >/dev/null
-    apksigner sign --ks "$keystore" --ks-pass pass:android --key-pass pass:android \
-        --ks-key-alias androiddebugkey --out "$out/screenstream-app.apk" "$work/aligned.apk"
+    keystore=${KEYSTORE:-$HOME/.android/debug.keystore}
+    store_password=${KEYSTORE_PASSWORD:-android}
+    key_alias=${KEY_ALIAS:-androiddebugkey}
+    # One password is the common case: a PKCS12 keystore ties the key's password
+    # to the store's, and apksigner refuses two that differ.
+    key_password=${KEY_PASSWORD:-$store_password}
+    if [ -z "${KEYSTORE:-}" ]; then
+        # The debug key is a convenience for a local build, made on this machine
+        # and never the one a release is signed with.
+        [ -f "$keystore" ] || keytool -genkeypair -keystore "$keystore" -storepass android \
+            -keypass android -alias androiddebugkey -keyalg RSA -keysize 2048 \
+            -validity 10000 -dname 'CN=Android Debug,O=Android,C=US' >/dev/null
+    fi
+    [ -f "$keystore" ] || { echo "no keystore at $keystore" >&2; exit 1; }
+    apksigner sign --ks "$keystore" --ks-pass "pass:$store_password" \
+        --key-pass "pass:$key_password" --ks-key-alias "$key_alias" \
+        --out "$out/screenstream-app.apk" "$work/aligned.apk"
     rm -rf "$work"
     echo "built $out/screenstream-app.apk ($(wc -c < "$out/screenstream-app.apk") bytes)"
     exit 0
