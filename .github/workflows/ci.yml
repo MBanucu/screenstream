@@ -20,14 +20,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      # No device: the control reply's Bundle wrapper and key=value vocabulary.
-      - name: host-side control tests
+      # No device: the control reply's Bundle wrapper, the key=value vocabulary,
+      # and the frame/fMP4 parsers with their data built in memory.
+      - name: host-side tests
         run: python3 -m unittest discover -s test -v
+
+      # The distribution is what `pip install screenstream-client` will run, so
+      # the console scripts are checked here rather than after a release.
+      - name: install the client and check its commands
+        run: |
+          set -euo pipefail
+          python3 -m pip install --no-deps -e client
+          screenstream-stream --help >/dev/null
+          screenstream-fmp4 --help >/dev/null
+          python3 -c "import screenstream_client; print('client', screenstream_client.PROTOCOL_VERSION)"
 
       - name: Android SDK
         run: |

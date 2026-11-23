@@ -104,3 +104,55 @@ jobs:
           done
           echo "### screenstream $version" >>"$GITHUB_STEP_SUMMARY"
           echo "Deployment \`$deployment\` submitted to Maven Central." >>"$GITHUB_STEP_SUMMARY"
+
+  # The Python client is the same release as the AAR: one tag, one version.
+  #
+  # This uses PyPI trusted publishing, so there is no PYPI_TOKEN secret. Two
+  # pieces of setup live in the PyPI project and the repository, not here:
+  #   - PyPI: a trusted publisher for project `screenstream-client`, owner
+  #     MBanucu, repository screenstream, workflow release.yml, environment pypi.
+  #   - GitHub: an environment named `pypi` (optionally with required reviewers).
+  # Until they exist this job fails at the upload, after the Maven and APK jobs;
+  # see README, "Publishing: PyPI, for the client".
+  pypi:
+    name: publish the client to PyPI
+    runs-on: ubuntu-24.04
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || github.ref }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # A tag and a pyproject version that disagree would publish one release
+      # number to PyPI and another to Maven Central.
+      - name: The tag and the client version agree
+        env:
+          VERSION: ${{ github.event.release.tag_name || inputs.version }}
+        run: |
+          set -euo pipefail
+          version=${VERSION#v}
+          declared=$(python3 -c "import tomllib; print(tomllib.load(open('client/pyproject.toml', 'rb'))['project']['version'])")
+          if [ "$version" != "$declared" ]; then
+            echo "::error::$VERSION is not client/pyproject.toml's version $declared"
+            exit 1
+          fi
+          echo "screenstream-client $version" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Build the wheel and sdist
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet --upgrade build
+          python3 -m build client --outdir dist
+          ls -l dist
+
+      - name: Upload to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/

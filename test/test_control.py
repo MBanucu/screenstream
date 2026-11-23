@@ -17,6 +17,7 @@ import control  # noqa: E402
 
 STATUS = """state=streaming
 port=43127
+protocol=2.0
 size=1440x3200
 scale=1
 format=rgba8888
@@ -40,7 +41,7 @@ grant_route=appop
 """
 
 REQUIRED = (
-    "state", "port", "encoded_port", "frames_looked", "frames_changed",
+    "state", "port", "protocol", "encoded_port", "frames_looked", "frames_changed",
     "frames_sent", "frames_skipped", "recording", "recorded_frames",
     "recording_from_ns", "grant", "grant_route",
 )
