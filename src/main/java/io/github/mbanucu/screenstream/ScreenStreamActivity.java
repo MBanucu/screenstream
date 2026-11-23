@@ -28,6 +28,10 @@ import android.util.Log;
  * recordings} directory; {@code --ez stop true} ends the recording and the
  * capture, without touching anything else the app has bound.
  *
+ * <p>The dialog is skipped where the {@code PROJECT_MEDIA} app-op is allowed; see
+ * {@link Grant}. This activity only records which route the token came from, so
+ * the control surface can report it.
+ *
  * <p>It is the activity to drive from adb because each {@code am start} makes a
  * new instance of it: a running activity that is started again gets the intent as
  * {@code onNewIntent}, which is not a path a command can rely on.
@@ -40,6 +44,8 @@ public final class ScreenStreamActivity extends Activity {
     private static final long RECORD_WAIT_MS = 5000;
 
     private boolean recordAfterGrant;
+    /** The app-op in force when the dialog was asked for; the route it took. */
+    private String appOp = Grant.UNKNOWN;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -55,6 +61,9 @@ public final class ScreenStreamActivity extends Activity {
             return;
         }
         recordAfterGrant = getIntent().getBooleanExtra("record", false);
+        // Read before the dialog: the route is the op that was in force when the
+        // token was issued, not whatever a later shell command changes it to.
+        appOp = Grant.state(this);
         MediaProjectionManager manager = getSystemService(MediaProjectionManager.class);
         if (manager == null) {
             fail("no MediaProjectionManager on this device");
@@ -84,9 +93,13 @@ public final class ScreenStreamActivity extends Activity {
             return;
         }
         if (result != RESULT_OK || data == null) {
+            // A refusal is the grant missing, not a capture that broke: the
+            // control surface answers waiting_for_grant and names the app-op.
+            ScreenStream.noteGrantPending();
             fail("the screen capture dialog was not accepted");
             return;
         }
+        ScreenStream.noteGrantRoute(Grant.startRoute(appOp));
         // A machine on the far side of adb cannot take 18 MB a frame over a
         // wireless link; --ei scale 2 makes the compositor hand over half-size
         // frames instead of this class downscaling them afterwards.

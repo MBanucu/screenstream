@@ -79,7 +79,9 @@ The adb commands go to `ScreenStreamActivity`, not to the UI activity, because
 each `am start` makes a fresh instance of it: starting a *running* activity again
 is delivered as `onNewIntent`, which is not a path a script can rely on. Adb's
 `--ez record true` records into the app's `recordings/` directory; the path is in
-the state file.
+the state file. For an unattended run with no tap, and an answer that is only
+`streaming` after the first frame, use **Recording headlessly on a fresh device**
+below.
 
 **A note on the port.** `adb forward tcp:7100 tcp:7100` collides when the machine
 holding adb is the phone itself (Termux, say): the forward's listener and the
@@ -98,6 +100,7 @@ synchronously and which starts the app on demand:
 AUTH=content://io.github.mbanucu.screenstream.control
 
 adb shell content call --uri $AUTH --method status
+adb shell content call --uri $AUTH --method grant
 adb shell content call --uri $AUTH --method start \
     --extra port:i:0 --extra encoded_port:i:0
 adb shell content call --uri $AUTH --method record
@@ -117,11 +120,26 @@ extras:
 | `timeout_ms:i:N` | `20000` | how long to wait for the first frame |
 
 `start` replies only when the first composited frame has arrived (a still screen
-still produces those), with `state=streaming` and the port it actually bound; or
-with `state=failed`, a `why` line and `code=400`. Asking for a start while
-something is already streaming does not make a second listener: the reply is the
-running port. A bind error names the port that was in the way, so two runs can
+still produces those), with `state=streaming` and the port it actually bound. It
+answers `state=failed`, a `why` line and `code=400` when the capture or its port
+did not come up; a capture that is live but has produced no frame is failed too,
+never called streaming. When the missing piece is the grant, the answer is
+`state=waiting_for_grant`, `reason=dialog`, and the exact `command=` that would
+grant it. Asking for a start while something is already streaming does not make a
+second listener: the reply is the running port, once that capture's first frame
+has arrived. A bind error names the port that was in the way, so two runs can
 follow one another on different ports without either silently reusing 7100.
+
+Every `status` and `start` reply also carries `grant=yes|no|unknown` and
+`grant_route=appop|dialog|none|unknown`. `grant=yes` means the projection can be
+issued without a tap: a standing app-op or a capture that is already running.
+`grant=no` means the system would ask, and `unknown` means this build could not be
+asked. `grant` reports the same without starting anything, and adds the
+`command=` that sets the app-op and a `revoke_command=` for after the run:
+
+```bash
+python3 client/control.py grant
+```
 
 The reply is a Bundle with `code` (`0` for a successful call, `400` for one that
 could not do what was asked) and `data`, one `key=value` line per field in the
@@ -136,17 +154,19 @@ frames_changed=3
 recording=-
 recorded_frames=0
 recording_from_ns=0
+grant=yes
+grant_route=appop
 }]
 ```
 
 `status` includes at least `state`, `port`, `encoded_port`, `frames_looked`,
 `frames_changed`, `frames_sent`, `frames_skipped`, `recording`,
-`recorded_frames` and `recording_from_ns`. `record` starts an MP4 in the app's
-`recordings/` directory and replies with its path in `recording`; `recording`
-ends that file, waits for its index and adds `recording_file=` with the path it
-wrote. `stop` ends the capture, finalising a recording first, waits until the
-reply says `state=stopped`, and adds `recording_file=` if a recording was being
-written.
+`recorded_frames`, `recording_from_ns`, `grant` and `grant_route`. `record`
+starts an MP4 in the app's `recordings/` directory and replies with its path in
+`recording`; `recording` ends that file, waits for its index and adds
+`recording_file=` with the path it wrote. `stop` ends the capture, finalising a
+recording first, waits until the reply says `state=stopped`, and adds
+`recording_file=` if a recording was being written.
 
 `client/control.py` wraps the call and parses the Bundle:
 
@@ -157,16 +177,67 @@ python3 client/control.py status
 
 Only adb shell, root, system and the app itself may call the provider; any other
 caller gets `code=403` and an `error=` line. The projection dialog is still the
-system's: `start` launches `ScreenStreamActivity` to ask for it, so the dialog
-must be answerable — with an `appops set ... PROJECT_MEDIA allow` grant, a dialog
-clicker from an accessibility service, or a foreground app allowed to start the
-activity. The intents and the state file are unchanged and remain the debug
-record; the provider is the documented path for automation.
+system's, but there is a headless path: `adb shell appops set <package>
+PROJECT_MEDIA allow` before a run, where the platform honours it. The block below
+does that, verifies it with `grant=yes`, and revokes it afterwards; a dialog
+clicker from an accessibility service remains a fallback, not a requirement. The
+intents and the state file are unchanged and remain the debug record; the provider
+is the documented path for automation.
+
+### Recording headlessly on a fresh device
+
+One copy-pasteable run: install, opt into the app-op for this run, start only
+after the first frame, record, pull the file, and put the grant back. The
+`client/control.py` calls exit non-zero when the provider's `code` is 400, so the
+block stops instead of recording a black video.
+
+```bash
+set -euo pipefail
+PKG=io.github.mbanucu.screenstream.app
+
+bash build.sh apk
+adb install -r out/screenstream-app.apk
+
+# Opt-in, per run: let the platform skip the projection dialog. The app does not
+# ask for this on install and this block revokes it at the end.
+adb shell appops set "$PKG" PROJECT_MEDIA allow
+grant=$(python3 client/control.py grant)
+printf '%s\n' "$grant"
+printf '%s\n' "$grant" | grep -qx 'grant=yes'          # verification
+
+# Start returns only after the first composited frame; port 0 asks for a free one.
+python3 client/control.py start --port 0 --encoded-port 0
+python3 client/control.py record
+
+sleep 10                                 # the run to record
+
+python3 client/control.py recording      # waits for the MP4 index, prints recording_file=
+python3 client/control.py stop
+mkdir -p out/recordings
+adb pull "/sdcard/Android/data/$PKG/files/recordings/." out/recordings/
+
+# Leave the device asking through the dialog again.
+adb shell appops set "$PKG" PROJECT_MEDIA default
+```
+
+`grant=yes` is the assertion to make before recording; `grant=no` or
+`grant=unknown` is a reason to fail the run rather than start it. If the app-op is
+not honoured on a device, `start` returns `state=waiting_for_grant` with
+`reason=dialog` and the command that would grant it, and no stream is claimed.
+
+**The fallback is a dialog, not a second APK.** When the app-op route is refused,
+a person can tap **Start now**; an unattended run can accept the same dialog with
+`adb shell input tap X Y` after finding the button's bounds with `adb shell
+uiautomator dump /sdcard/window.xml`, or with an accessibility service wired to
+`ScreenStream.setDialogClicker` (the probe's `acceptScreenCaptureDialog`). The
+result is `grant=yes` with `grant_route=dialog`. None of that is required when
+`grant=yes grant_route=appop` is already the answer.
 
 What it is doing is in `Android/data/io.github.mbanucu.screenstream.app/files/screenstream.txt`:
 
 ```
-state=streaming          stopped, streaming, failed
+state=streaming          stopped, streaming, failed; waiting_for_grant is a
+                         control reply, not a state written here
 port=7100                the raw port bound; 7100 unless a start asked for another
 size=1440x3200           the frame size, after scale
 scale=1
@@ -531,11 +602,17 @@ time. Three ways to answer it, in decreasing order of honesty:
 2. **An accessibility service clicks it.** `ScreenStream.setDialogClicker(runnable)`
    — how the app this was extracted from accepts the dialog, the same interaction a
    screen-reader user performs.
-3. **An app-op.** `adb shell appops set <package> PROJECT_MEDIA allow` makes the
-   system answer without a dialog. Verified here with accessibility off. It is not a
-   documented third-party API, and it is persistent: an app with it can start
-   capturing after any cold start with no user involvement. Fine for a test phone,
-   wrong for anything shipped.
+3. **An app-op, opted into per run.** `adb shell appops set <package> PROJECT_MEDIA
+   allow` makes the system answer without a dialog. Verified here with
+   accessibility off. It is not a documented third-party API, and it is
+   persistent: an app with it can start capturing after any cold start with no
+   user involvement. The headless recipe above sets it immediately before a run
+   and resets it with `appops set <package> PROJECT_MEDIA default` afterwards;
+   the app never sets it and installs with no grant. `grant` reports whether it is
+   in force and `status` reports `grant=yes|no|unknown`, so a harness can refuse to
+   record blind. A standing grant is fine for a test phone, wrong for anything
+   shipped: while it is set, anything able to start the activity can capture the
+   screen with no tap and no visible consent.
 
 ## Limits
 
