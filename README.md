@@ -176,6 +176,13 @@ same reason as above: `adb forward tcp:7201 tcp:7101`.
   the viewer's fragments start there, instead of waiting up to the two-second
   interval. Fragments also close after a second, so a quiet screen does not hold
   the last pictures back.
+- **The init segment says when the track's zero was.** A track's times count from its
+  first frame, which leaves a captured stream unable to say when that was. The init
+  segment therefore carries the device clock's reading for it in a private
+  `udta`/`uuid` box, and `client/fmp4.py` prints it as `base_ns`: a frame's device
+  time is then `base_ns + pts * 1000`, the same clock the raw stream's frame headers
+  use. Readers that do not know the UUID step over the box by size, so `ffprobe`,
+  VLC and `ffplay` are unaffected.
 - **The encoder is the phone's hardware one** where there is one:
   `c2.mtk.avc.encoder` on this device (H.264, up to 3840x2176). There is no hardware
   VP8 or VP9 here — `c2.android.vp8.encoder` is a software component capped at

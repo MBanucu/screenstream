@@ -27,11 +27,28 @@ import java.util.List;
  * what keeps a variable frame rate honest: a frame's duration is the next frame's
  * presentation time minus its own, so a gap in the screen is a gap in the file
  * rather than a frame repeated to fill it.
+ *
+ * <p>Because those times count from the track's first frame, the file alone cannot
+ * say <em>when</em> that was. The init segment therefore carries the device clock's
+ * reading for the track's zero in a private {@code udta}/{@code uuid} box: an
+ * extension box is what the format provides for exactly this, and a reader that does
+ * not know its UUID steps over it by size. The raw stream's frame headers carry the
+ * same clock, so a viewer of both can line them up without an offset.
  */
 final class Fmp4 {
 
     /** MP4 video timescale. Durations are ticks of 1/90000 s, about 11 us. */
     static final int TIMESCALE = 90_000;
+
+    /**
+     * UUID of the {@code udta} box holding the device clock's zero, so a reader can
+     * tell its own extension from anyone else's: {@code 6d42414e-7563-7500-7374-
+     * 7265616d0001}.
+     */
+    private static final byte[] BASE_UUID = {
+        0x6d, 0x42, 0x41, 0x4e, 0x75, 0x63, 0x75, 0x00,
+        0x73, 0x74, 0x72, 0x65, 0x61, 0x6d, 0x00, 0x01,
+    };
 
     private static final int[] MATRIX = {
         0x00010000, 0, 0,
@@ -44,9 +61,14 @@ final class Fmp4 {
 
     /**
      * The init segment: {@code ftyp} and a {@code moov} with no samples in it, only
-     * the track's description and the {@code mvex} that says samples arrive later.
+     * the track's description, the {@code mvex} that says samples arrive later, and
+     * the {@code udta} that says when the track's zero was on the device's clock.
+     *
+     * @param baseNs the device clock's reading for the first frame, or zero if the
+     *     encoder has not produced one yet, in which case no {@code udta} is written
+     *     rather than an invented time
      */
-    static byte[] init(MediaFormat format, int width, int height) {
+    static byte[] init(MediaFormat format, int width, int height, long baseNs) {
         ByteBuffer csd0 = format.getByteBuffer("csd-0");
         ByteBuffer csd1 = format.getByteBuffer("csd-1");
         if (csd0 == null) {
@@ -108,7 +130,18 @@ final class Fmp4 {
         byte[] mvex = new Buf().bytes(trex).box("mvex");
 
         byte[] trak = new Buf().bytes(tkhd).bytes(mdia).box("trak");
-        byte[] moov = new Buf().bytes(mvhd).bytes(trak).bytes(mvex).box("moov");
+        Buf moov = new Buf().bytes(mvhd).bytes(trak).bytes(mvex);
+        if (baseNs > 0) {
+            // udta is the last child of moov by definition, and an unknown box is
+            // skipped by size, so this cannot affect what a player does with the file.
+            byte[] base = new Buf()
+                    .bytes(BASE_UUID)
+                    .u32(1).u32(0)
+                    .u64(baseNs)
+                    .box("uuid");
+            moov.bytes(new Buf().bytes(base).box("udta"));
+        }
+        byte[] moovBox = moov.box("moov");
 
         byte[] ftyp = new Buf().ascii("isom").u32(0x200)
                 .ascii("isom").ascii("iso5").ascii("avc1").ascii("mp41")
@@ -116,7 +149,7 @@ final class Fmp4 {
 
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         out.writeBytes(ftyp);
-        out.writeBytes(moov);
+        out.writeBytes(moovBox);
         return out.toByteArray();
     }
 

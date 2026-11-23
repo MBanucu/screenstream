@@ -147,7 +147,10 @@ final class EncodedStream implements Recorder.Sink {
                     ? format.getInteger(MediaFormat.KEY_WIDTH) : 0;
             int height = format.containsKey(MediaFormat.KEY_HEIGHT)
                     ? format.getInteger(MediaFormat.KEY_HEIGHT) : 0;
-            byte[] segment = Fmp4.init(format, width, height);
+            // The init segment's udta takes the device clock's zero from the encoder
+            // the viewer is watching, so the track's own times can be placed on it.
+            long baseUs = owner != null ? owner.startedAtUs() : -1;
+            byte[] segment = Fmp4.init(format, width, height, Math.max(0, baseUs) * 1000);
             // The same encoder announces its format more than once, and a new
             // generation would make every viewer wait for another keyframe.
             if (java.util.Arrays.equals(segment, init)) {
@@ -155,7 +158,9 @@ final class EncodedStream implements Recorder.Sink {
             }
             init = segment;
             generation++;
-            Log.i(TAG, "encoded stream: init segment for " + width + "x" + height);
+            Log.i(TAG, "encoded stream: init segment for " + width + "x" + height
+                    + (baseUs >= 0 ? ", device base " + baseUs * 1000 + " ns"
+                    : ", no device base yet"));
         } catch (RuntimeException failed) {
             Log.w(TAG, "encoded stream has no init segment: " + failed);
         }
@@ -206,6 +211,13 @@ final class EncodedStream implements Recorder.Sink {
             } catch (IOException closed) {
                 return;
             }
+        }
+    }
+
+    private void sync() {
+        Recorder current = owner;
+        if (current != null) {
+            current.requestSync();
         }
     }
 
@@ -267,6 +279,11 @@ final class EncodedStream implements Recorder.Sink {
                         waiting = true;
                         fragment.clear();
                         pending = null;
+                        // A viewer that attaches before the encoder has produced
+                        // anything gets the init when that format arrives, which is
+                        // after the stream's only keyframe has already gone by. Ask
+                        // for another, or this viewer waits for one that never comes.
+                        sync();
                     }
                     Fmp4.Sample sample = queue.poll(200, TimeUnit.MILLISECONDS);
                     if (sample == null) {
