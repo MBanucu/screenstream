@@ -107,18 +107,27 @@ import java.util.concurrent.atomic.AtomicInteger;
  *     --ez stop true
  * </pre>
  *
+ * <p>For automation, {@link ControlProvider} is the synchronous surface: a
+ * {@code content call} reports the state, starts and stops the capture, and
+ * returns the port it actually bound instead of leaving a caller to poll the
+ * file. The service itself stays driven by the intents above.
+ *
  * <p>What the service is doing is written to {@link #statusFile} in the app's own
  * external files directory, so it can be read over adb while the accessibility
  * service is off.
  */
 public final class ScreenStream extends Service {
 
-    /** Every consumer uses this port, so a forward is all adb needs. */
+    /** The default port; a start may name another one, or 0 for an ephemeral one. */
     public static final int PORT = 7100;
     public static final String ACTION_START = "io.github.mbanucu.screenstream.START";
     public static final String ACTION_STOP = "io.github.mbanucu.screenstream.STOP";
     public static final String EXTRA_RESULT = "result";
     public static final String EXTRA_SCALE = "scale";
+    /** The raw stream's port: the default unless a start named one, 0 = ephemeral. */
+    public static final String EXTRA_PORT = "port";
+    /** The encoded stream's port: the default unless a start named one, 0 = ephemeral. */
+    public static final String EXTRA_ENCODED_PORT = "encoded_port";
     /** The state this service writes, in the app's external files directory. */
     public static final String STATUS_FILE = "screenstream.txt";
 
@@ -137,11 +146,14 @@ public final class ScreenStream extends Service {
     /** The encoder that exists only while someone watches the encoded stream. */
     private volatile Recorder streamEncoder;
     private volatile EncodedStream encoded;
+    private volatile boolean recordingFinalizing;
     private volatile long lastRecordedFrames, lastRecordedMs, lastRecordedFromNs;
     private ImageReader reader;
     private HandlerThread thread;
     private ServerSocketChannel server;
     private int width, height, scale = 1;
+    /** The ports this capture actually bound. */
+    private int port = PORT, encodedPort = EncodedStream.PORT;
 
     private final List<Client> clients = new CopyOnWriteArrayList<>();
     private static final List<Tap> taps = new CopyOnWriteArrayList<>();
@@ -150,7 +162,11 @@ public final class ScreenStream extends Service {
     private static int allocated;
     /** True while a capture is running in this process, so a tap knows to wait. */
     private static volatile boolean live;
+    private static volatile boolean running;
     private static volatile ScreenStream self;
+    private static volatile String lastReport;
+    private static volatile String lastFailure;
+    private static volatile File lastFinishedRecording;
     private static long frameNumber;
     private static volatile Runnable dialogClicker;
     private long previousSignature;
@@ -165,8 +181,11 @@ public final class ScreenStream extends Service {
             return START_NOT_STICKY;
         }
         if (ACTION_START.equals(action) && intent.getParcelableExtra(EXTRA_RESULT) != null) {
+            running = true;
             startForeground(1, notification());
-            begin(intent.getParcelableExtra(EXTRA_RESULT), intent.getIntExtra(EXTRA_SCALE, 1));
+            begin(intent.getParcelableExtra(EXTRA_RESULT), intent.getIntExtra(EXTRA_SCALE, 1),
+                    intent.getIntExtra(EXTRA_PORT, PORT),
+                    intent.getIntExtra(EXTRA_ENCODED_PORT, EncodedStream.PORT));
             return START_STICKY;
         }
         return START_NOT_STICKY;
@@ -174,10 +193,23 @@ public final class ScreenStream extends Service {
 
     /** Starts a capture with a token a {@link MediaProjectionManager} handed out. */
     public static void start(Context context, Intent projection, int scale) {
+        start(context, projection, scale, PORT, EncodedStream.PORT);
+    }
+
+    /**
+     * Starts a capture on the ports named, or returns to the defaults.
+     *
+     * <p>{@code port} and {@code encodedPort} may be 0, which asks the kernel for
+     * a free one; {@link #port()} and {@link #encodedPort()} report what was bound.
+     */
+    public static void start(Context context, Intent projection, int scale,
+                             int port, int encodedPort) {
         Intent service = new Intent(context, ScreenStream.class)
                 .setAction(ACTION_START)
                 .putExtra(EXTRA_RESULT, projection)
-                .putExtra(EXTRA_SCALE, Math.max(1, scale));
+                .putExtra(EXTRA_SCALE, Math.max(1, scale))
+                .putExtra(EXTRA_PORT, port)
+                .putExtra(EXTRA_ENCODED_PORT, encodedPort);
         if (Build.VERSION.SDK_INT >= 26) {
             context.startForegroundService(service);
         } else {
@@ -257,6 +289,110 @@ public final class ScreenStream extends Service {
         return stream == null ? 0 : stream.height;
     }
 
+    /** The port the raw stream is serving, or the default while nothing is. */
+    public static int port() {
+        ScreenStream stream = self;
+        return stream == null ? PORT : stream.port;
+    }
+
+    /** The encoded stream's bound port, or -1 when it is not serving. */
+    public static int encodedPort() {
+        ScreenStream stream = self;
+        return stream == null || stream.encoded == null ? -1 : stream.encoded.port();
+    }
+
+    /** Composited frames seen by the current capture; 0 when there is none. */
+    static long framesLooked() {
+        ScreenStream stream = self;
+        return stream == null ? 0 : stream.looked;
+    }
+
+    /** Why the last start failed, or null if it did not. */
+    static String startFailure() {
+        return lastFailure;
+    }
+
+    /** Clears a previous start's failure before a new one is asked for. */
+    static void clearStartFailure() {
+        lastFailure = null;
+    }
+
+    /** Records a failure outside the service, e.g. a dialog that was not accepted. */
+    static void noteStartFailure(String why) {
+        lastFailure = why;
+    }
+
+    /** True once the service has finished stopping, including a recording's index. */
+    static boolean serviceStopped() {
+        return !running;
+    }
+
+    /**
+     * The state as the provider replies, in the state file's key=value vocabulary.
+     *
+     * <p>This is an in-process answer, not a read of {@link #statusFile}: a fresh
+     * process with no capture says stopped without launching anything. A service
+     * that is gone leaves its last report, so a caller that stops it sees the
+     * counters and the final recording rather than a default.
+     */
+    static String report() {
+        ScreenStream stream = self;
+        if (stream != null) {
+            return stream.statusBody(live ? "streaming" : "stopped", null).toString();
+        }
+        String cached = lastReport;
+        return cached != null ? cached : idleReport("stopped", null, PORT);
+    }
+
+    /** A full report for a start that never became a capture. */
+    static String failureReport(int requestedPort, String why) {
+        return idleReport("failed", why, requestedPort);
+    }
+
+    private static String idleReport(String state, String why, int port) {
+        StringBuilder out = new StringBuilder();
+        out.append("state=").append(state).append('\n');
+        if (why != null) {
+            out.append("why=").append(oneLine(why)).append('\n');
+        }
+        out.append("port=").append(port).append('\n');
+        out.append("size=0x0\n");
+        out.append("scale=1\n");
+        out.append("format=rgba8888\n");
+        out.append("frames_looked=0\n");
+        out.append("frames_changed=0\n");
+        out.append("frames_sent=0\n");
+        out.append("frames_skipped=0\n");
+        out.append("clients=0\n");
+        out.append("taps=0\n");
+        out.append("recording=-\n");
+        out.append("recorded_frames=0\n");
+        out.append("recorded_ms=0\n");
+        out.append("recording_from_ns=0\n");
+        out.append("encoded_port=-\n");
+        out.append("encoded_clients=0\n");
+        out.append("encoded_frames=0\n");
+        out.append("encoded_bytes=0\n");
+        out.append("encoder=-\n");
+        return out.toString();
+    }
+
+    /** The recording that finished last, or null when none ever ran. */
+    static File lastRecording() {
+        return lastFinishedRecording;
+    }
+
+    /** True while a recording is being finalised after its last frame. */
+    static boolean recordingFinalizing() {
+        ScreenStream stream = self;
+        return stream != null && stream.recordingFinalizing;
+    }
+
+    /** Keeps one field on one line so a reply stays parseable. */
+    static String oneLine(String value) {
+        return value == null ? "" : value.replace('\n', ' ').replace('\r', ' ');
+    }
+
     private synchronized boolean startRecording(File file) {
         if (!live || recorder != null) {
             return false;
@@ -303,26 +439,36 @@ public final class ScreenStream extends Service {
             return null;
         }
         recorder = null;
+        // Set before the caller sees the recorder gone: a provider asked to stop
+        // the recording must not answer while the MP4 index is still being written.
+        recordingFinalizing = true;
         lastRecordedFrames = ending.frames();
         lastRecordedMs = ending.milliseconds();
         lastRecordedFromNs = Math.max(0, ending.startedAtUs()) * 1000;
+        if (ending.file() != null) {
+            lastFinishedRecording = ending.file();
+        }
         return ending;
     }
 
     /** Blocks until the encoder has written its last frames and the file's index. */
     private void finishRecording(Recorder ending) {
-        ending.stop();
-        lastRecordedFrames = ending.frames();
-        lastRecordedMs = ending.milliseconds();
-        if (ending.failure() != null) {
-            Log.w(TAG, "recording ended with: " + ending.failure());
+        try {
+            ending.stop();
+            lastRecordedFrames = ending.frames();
+            lastRecordedMs = ending.milliseconds();
+            if (ending.failure() != null) {
+                Log.w(TAG, "recording ended with: " + ending.failure());
+            }
+            Log.i(TAG, "recording finished: " + lastRecordedFrames + " frames, "
+                    + lastRecordedMs + " ms");
+            // The recording outlives the capture it was started with: this runs on
+            // its own thread and may land after the service has stopped, and a
+            // "streaming" written then would describe a service that is gone.
+            status(live ? "streaming" : "stopped");
+        } finally {
+            recordingFinalizing = false;
         }
-        Log.i(TAG, "recording finished: " + lastRecordedFrames + " frames, "
-                + lastRecordedMs + " ms");
-        // The recording outlives the capture it was started with: this runs on its
-        // own thread and may land after the service has stopped, and a "streaming"
-        // written then would describe a service that is gone.
-        status(live ? "streaming" : "stopped");
     }
 
     /** A viewer arrived or left; the encoder exists only while one is watching. */
@@ -393,9 +539,22 @@ public final class ScreenStream extends Service {
         return directory == null ? null : new File(directory, STATUS_FILE);
     }
 
-    private void begin(Intent result, int requestedScale) {
+    private void begin(Intent result, int requestedScale, int requestedPort,
+                       int requestedEncodedPort) {
         scale = Math.max(1, requestedScale);
         frameNumber = 0;
+        lastFailure = null;
+        port = requestedPort;
+        encodedPort = requestedEncodedPort;
+        if (requestedPort < 0 || requestedPort > 65535) {
+            fail("port must be 0 (ephemeral) or 1..65535, not " + requestedPort);
+            return;
+        }
+        if (requestedEncodedPort < 0 || requestedEncodedPort > 65535) {
+            fail("encoded_port must be 0 (ephemeral) or 1..65535, not "
+                    + requestedEncodedPort);
+            return;
+        }
         MediaProjectionManager manager = getSystemService(MediaProjectionManager.class);
         if (manager == null) {
             fail("no MediaProjectionManager");
@@ -435,14 +594,15 @@ public final class ScreenStream extends Service {
                 metrics.densityDpi, DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
                 reader.getSurface(), null, handler);
         // A port that cannot be opened is not a capture: another stream on the
-        // phone already has 7100, and saying "streaming" would be a lie that a UI
-        // and a recording would both act on.
-        if (!listen()) {
+        // phone may already have it, and saying "streaming" would be a lie that a
+        // UI and a recording would both act on.
+        if (!listen(requestedPort)) {
             return;
         }
         // The encoded stream is an extra, not the capture: a port that cannot be
         // opened costs the raw stream nothing, so it is logged and left out.
-        encoded = EncodedStream.open(this::encodedClients);
+        encoded = EncodedStream.open(requestedEncodedPort, this::encodedClients);
+        encodedPort = encoded == null ? -1 : encoded.port();
         live = true;
         self = this;
         // A viewer that attached before the capture was marked live has no encoder
@@ -454,12 +614,16 @@ public final class ScreenStream extends Service {
     }
 
     /** Opens the port and keeps accepting; a consumer leaves by disconnecting. */
-    private boolean listen() {
+    private boolean listen(int requestedPort) {
         try {
             server = ServerSocketChannel.open();
-            server.bind(new InetSocketAddress(InetAddress.getByName("127.0.0.1"), PORT));
+            server.bind(new InetSocketAddress(InetAddress.getByName("127.0.0.1"),
+                    requestedPort));
+            port = ((InetSocketAddress) server.getLocalAddress()).getPort();
         } catch (IOException failed) {
-            fail("could not listen on 127.0.0.1:" + PORT + ": " + failed);
+            // The requested port, not the field: a failed bind never reached the
+            // point where the field is the actual one.
+            fail("could not listen on 127.0.0.1:" + requestedPort + ": " + failed);
             return false;
         }
         new Thread(() -> {
@@ -811,9 +975,23 @@ public final class ScreenStream extends Service {
 
     private void status(String state) {
         lastStatus = SystemClock.elapsedRealtime();
+        publish(statusBody(state, null).toString());
+    }
+
+    /** Writes the report and keeps it for a provider answer after the service ends. */
+    private void publish(String body) {
+        lastReport = body;
+        Status.replace(this, STATUS_FILE, body);
+    }
+
+    /** The state file's body: one key=value per line, the vocabulary readers know. */
+    private StringBuilder statusBody(String state, String why) {
         StringBuilder out = new StringBuilder();
         out.append("state=").append(state).append('\n');
-        out.append("port=").append(PORT).append('\n');
+        if (why != null) {
+            out.append("why=").append(oneLine(why)).append('\n');
+        }
+        out.append("port=").append(port).append('\n');
         out.append("size=").append(width).append('x').append(height).append('\n');
         out.append("scale=").append(scale).append('\n');
         out.append("format=rgba8888\n");
@@ -842,7 +1020,7 @@ public final class ScreenStream extends Service {
         // reader can tell the hardware component from a software one.
         EncodedStream viewers = encoded;
         Recorder live = streamEncoder;
-        out.append("encoded_port=").append(viewers == null ? "-" : String.valueOf(EncodedStream.PORT))
+        out.append("encoded_port=").append(viewers == null ? "-" : String.valueOf(viewers.port()))
                 .append('\n');
         out.append("encoded_clients=").append(viewers == null ? 0 : viewers.clients()).append('\n');
         out.append("encoded_frames=").append(viewers == null ? 0 : viewers.samples()).append('\n');
@@ -850,12 +1028,13 @@ public final class ScreenStream extends Service {
         out.append("encoder=")
                 .append(running != null ? running.codecName()
                         : live != null ? live.codecName() : "-").append('\n');
-        Status.replace(this, STATUS_FILE, out.toString());
+        return out;
     }
 
     private void fail(String why) {
         live = false;
-        Status.replace(this, STATUS_FILE, "state=failed\nwhy=" + why + "\n");
+        lastFailure = why;
+        publish(statusBody("failed", why).toString());
         Log.w(TAG, why);
         stopSelf();
     }
@@ -872,8 +1051,8 @@ public final class ScreenStream extends Service {
         }
         return new Notification.Builder(this, "screen_stream")
                 .setContentTitle("Screen stream")
-                .setContentText("Raw frames on 127.0.0.1:" + PORT + ", video on "
-                        + EncodedStream.PORT)
+                .setContentText("Raw frames on 127.0.0.1:" + port + (encodedPort < 0
+                        ? ", no video port" : ", video on " + encodedPort))
                 .setSmallIcon(android.R.drawable.presence_video_online)
                 .build();
     }
@@ -922,6 +1101,7 @@ public final class ScreenStream extends Service {
             client.close();
         }
         status("stopped");
+        running = false;
         super.onDestroy();
     }
 

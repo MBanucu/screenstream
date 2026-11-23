@@ -275,7 +275,7 @@ public final class StreamUiActivity extends Activity {
             text.append("frames     ").append(ScreenStream.frameNumber())
                     .append(" changed, ").append((SystemClock.elapsedRealtime() - startedAt) / 1000)
                     .append(" s\n");
-            text.append("port       ").append(ScreenStream.PORT).append('\n');
+            text.append("port       ").append(ScreenStream.port()).append('\n');
         }
         text.append("recording  ");
         if (recording) {

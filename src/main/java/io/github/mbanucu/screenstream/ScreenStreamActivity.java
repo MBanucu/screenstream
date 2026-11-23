@@ -22,10 +22,11 @@ import android.util.Log;
  * </pre>
  *
  * <p>Extras: {@code --ei scale 2} captures at half size, which is what a machine
- * on the far side of a wireless link wants; {@code --ez record true} also records
- * the capture to an MP4 in the app's {@code recordings} directory; {@code --ez
- * stop true} ends the recording and the capture, without touching anything else
- * the app has bound.
+ * on the far side of a wireless link wants; {@code --ei port 0} and {@code --ei
+ * encoded_port 0} ask for ports the kernel chooses instead of 7100 and 7101;
+ * {@code --ez record true} also records the capture to an MP4 in the app's {@code
+ * recordings} directory; {@code --ez stop true} ends the recording and the
+ * capture, without touching anything else the app has bound.
  *
  * <p>It is the activity to drive from adb because each {@code am start} makes a
  * new instance of it: a running activity that is started again gets the intent as
@@ -90,8 +91,14 @@ public final class ScreenStreamActivity extends Activity {
         // wireless link; --ei scale 2 makes the compositor hand over half-size
         // frames instead of this class downscaling them afterwards.
         int scale = Math.max(1, getIntent().getIntExtra(ScreenStream.EXTRA_SCALE, 1));
-        ScreenStream.start(this, data, scale);
-        Log.i(TAG, "screen capture granted; the stream service is starting");
+        int port = getIntent().hasExtra(ScreenStream.EXTRA_PORT)
+                ? getIntent().getIntExtra(ScreenStream.EXTRA_PORT, ScreenStream.PORT)
+                : ScreenStream.PORT;
+        int encodedPort = getIntent().hasExtra(ScreenStream.EXTRA_ENCODED_PORT)
+                ? getIntent().getIntExtra(ScreenStream.EXTRA_ENCODED_PORT, EncodedStream.PORT)
+                : EncodedStream.PORT;
+        ScreenStream.start(this, data, scale, port, encodedPort);
+        Log.i(TAG, "screen capture granted; the stream service is starting on port " + port);
         finish();
         if (recordAfterGrant) {
             recordAfterGrant = false;
@@ -129,7 +136,9 @@ public final class ScreenStreamActivity extends Activity {
     }
 
     private void fail(String why) {
-        Status.replace(this, ScreenStream.STATUS_FILE, "state=failed\nwhy=" + why + "\n");
+        ScreenStream.noteStartFailure(why);
+        Status.replace(this, ScreenStream.STATUS_FILE, "state=failed\nwhy="
+                + ScreenStream.oneLine(why) + "\n");
         Log.w(TAG, why);
         finish();
     }

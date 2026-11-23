@@ -39,5 +39,13 @@
             android:name="io.github.mbanucu.screenstream.ScreenStream"
             android:exported="false"
             android:foregroundServiceType="mediaProjection" />
+
+        <!-- `adb shell content call` against this authority is the synchronous
+             path for automation: status, start with a chosen or ephemeral port,
+             stop, record and recording. -->
+        <provider
+            android:name="io.github.mbanucu.screenstream.ControlProvider"
+            android:authorities="io.github.mbanucu.screenstream.control"
+            android:exported="true" />
     </application>
 </manifest>

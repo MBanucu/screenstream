@@ -3,3 +3,5 @@ out/
 local.properties
 .gradle/
 build/
+__pycache__/
+*.pyc
