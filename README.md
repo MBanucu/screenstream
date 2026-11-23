@@ -11,7 +11,7 @@ a picture of it.
 
 | | |
 |---|---|
-| Transport | TCP `127.0.0.1:7100`, any number of consumers |
+| Transport | TCP `127.0.0.1:7100` (default; a start may choose or ask for an ephemeral port), any number of consumers |
 | Payload | RGBA_8888, `stride * height` bytes per frame |
 | Rate | only when the screen changes (VFR) |
 | Timing | device presentation time, nanoseconds, elapsed clock |
@@ -84,13 +84,90 @@ the state file.
 **A note on the port.** `adb forward tcp:7100 tcp:7100` collides when the machine
 holding adb is the phone itself (Termux, say): the forward's listener and the
 stream's listener are the same loopback port, and the capture fails to bind. Use
-`7200` on the host side, as above, and `--port 7200` for the client.
+`7200` on the host side, as above, and `--port 7200` for the client. The control
+surface below can instead ask the stream for an ephemeral port with `--extra
+port:i:0` and report the one it got.
+
+### Driving it from a script
+
+`am start` is one-shot: it returns before the capture is up, and the port used to
+be a constant. The app also exposes a `ContentProvider`, which a shell can call
+synchronously and which starts the app on demand:
+
+```bash
+AUTH=content://io.github.mbanucu.screenstream.control
+
+adb shell content call --uri $AUTH --method status
+adb shell content call --uri $AUTH --method start \
+    --extra port:i:0 --extra encoded_port:i:0
+adb shell content call --uri $AUTH --method record
+adb shell content call --uri $AUTH --method recording
+adb shell content call --uri $AUTH --method stop
+```
+
+`status` works from a fresh process, including after a reboot, and says
+`state=stopped` without the app having been launched first. `start` takes these
+extras:
+
+| extra | default | meaning |
+|---|---|---|
+| `port:i:N` | `7100` | raw port; `0` asks the kernel for a free one |
+| `encoded_port:i:N` | `7101` | H.264 port; `0` asks the kernel for a free one |
+| `scale:i:N` | `1` | `2` captures at half size |
+| `timeout_ms:i:N` | `20000` | how long to wait for the first frame |
+
+`start` replies only when the first composited frame has arrived (a still screen
+still produces those), with `state=streaming` and the port it actually bound; or
+with `state=failed`, a `why` line and `code=400`. Asking for a start while
+something is already streaming does not make a second listener: the reply is the
+running port. A bind error names the port that was in the way, so two runs can
+follow one another on different ports without either silently reusing 7100.
+
+The reply is a Bundle with `code` (`0` for a successful call, `400` for one that
+could not do what was asked) and `data`, one `key=value` line per field in the
+state file's vocabulary:
+
+```
+Result: Bundle[{code=0, data=state=streaming
+port=43127
+encoded_port=43128
+frames_looked=8
+frames_changed=3
+recording=-
+recorded_frames=0
+recording_from_ns=0
+}]
+```
+
+`status` includes at least `state`, `port`, `encoded_port`, `frames_looked`,
+`frames_changed`, `frames_sent`, `frames_skipped`, `recording`,
+`recorded_frames` and `recording_from_ns`. `record` starts an MP4 in the app's
+`recordings/` directory and replies with its path in `recording`; `recording`
+ends that file, waits for its index and adds `recording_file=` with the path it
+wrote. `stop` ends the capture, finalising a recording first, waits until the
+reply says `state=stopped`, and adds `recording_file=` if a recording was being
+written.
+
+`client/control.py` wraps the call and parses the Bundle:
+
+```bash
+python3 client/control.py start --port 0 --encoded-port 0
+python3 client/control.py status
+```
+
+Only adb shell, root, system and the app itself may call the provider; any other
+caller gets `code=403` and an `error=` line. The projection dialog is still the
+system's: `start` launches `ScreenStreamActivity` to ask for it, so the dialog
+must be answerable — with an `appops set ... PROJECT_MEDIA allow` grant, a dialog
+clicker from an accessibility service, or a foreground app allowed to start the
+activity. The intents and the state file are unchanged and remain the debug
+record; the provider is the documented path for automation.
 
 What it is doing is in `Android/data/io.github.mbanucu.screenstream.app/files/screenstream.txt`:
 
 ```
 state=streaming          stopped, streaming, failed
-port=7100
+port=7100                the raw port bound; 7100 unless a start asked for another
 size=1440x3200           the frame size, after scale
 scale=1
 format=rgba8888
@@ -105,7 +182,7 @@ recorded_frames=         frames written to it (or to the last one)
 recorded_ms=             its length so far, from the last frame written
 recording_from_ns=       the file's zero on the stream's clock: a frame's
                          timestamp minus this is where its picture is in it
-encoded_port=            the encoded stream's port, or - when it is not serving
+encoded_port=            the encoded stream's bound port, or - when it is not serving
 encoded_clients=         viewers attached to it
 encoded_frames=          samples the encoder produced for them
 encoded_bytes=           bytes written to all of them together
@@ -285,8 +362,10 @@ need: connect, read a header, read `stride * height` bytes, decide, repeat.
 deliberately small enough to re-implement in any language a test harness is
 written in.
 
-- **Host-side tests** (anything driving the phone over adb): `adb forward`, connect
-  to `127.0.0.1:7100`, no Android dependency at all.
+- **Host-side tests** (anything driving the phone over adb): `content call` to the
+  control provider for a synchronous start and the bound port, then `adb forward`
+  and connect to that port; no Android dependency at all. `client/control.py`
+  parses the reply, and `test/test_control.py` checks that parsing without a phone.
 - **On-device tests** (instrumentation, an Espresso-like framework): depend on the
   AAR and `subscribe` in-process, so a frame costs no socket and no copy.
 - **Assertions about time**: `frame.number` and `frame.timestampNs` line up with

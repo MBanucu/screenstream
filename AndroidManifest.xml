@@ -26,5 +26,14 @@
             android:name=".ScreenStream"
             android:exported="false"
             android:foregroundServiceType="mediaProjection" />
+
+        <!-- The synchronous control surface: `adb shell content call` against this
+             authority starts, stops and reports the stream. It is exported because
+             adb shell is a different uid, and checks its caller inside; a provider
+             is started on demand, so status answers even before the app ran. -->
+        <provider
+            android:name=".ControlProvider"
+            android:authorities="io.github.mbanucu.screenstream.control"
+            android:exported="true" />
     </application>
 </manifest>

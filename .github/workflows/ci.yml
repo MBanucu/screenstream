@@ -25,6 +25,10 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      # No device: the control reply's Bundle wrapper and key=value vocabulary.
+      - name: host-side control tests
+        run: python3 -m unittest discover -s test -v
+
       - name: Android SDK
         run: |
           sdk="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"

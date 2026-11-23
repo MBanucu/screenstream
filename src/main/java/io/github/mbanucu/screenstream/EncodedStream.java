@@ -47,7 +47,7 @@ import java.util.function.IntConsumer;
  */
 final class EncodedStream implements Recorder.Sink {
 
-    /** The port this listens on, next to the raw stream's 7100. */
+    /** The port this listens on by default, next to the raw stream's 7100. */
     static final int PORT = 7101;
 
     private static final String TAG = "ScreenStream";
@@ -65,6 +65,8 @@ final class EncodedStream implements Recorder.Sink {
     private static final long WRITE_DEADLINE_MS = 2000;
 
     private final ServerSocketChannel server;
+    /** The port it actually bound: the requested one, or one the kernel chose. */
+    private final int port;
     private final IntConsumer onClients;
     private final List<Client> clients = new CopyOnWriteArrayList<>();
     private final AtomicLong samples = new AtomicLong();
@@ -77,20 +79,37 @@ final class EncodedStream implements Recorder.Sink {
     private volatile boolean closed;
 
     static EncodedStream open(IntConsumer onClients) {
+        return open(PORT, onClients);
+    }
+
+    /**
+     * Binds {@code requestedPort}, which may be 0 for one the kernel chooses.
+     *
+     * <p>A port that cannot be opened costs the raw stream nothing, so this
+     * returns null rather than failing the capture; the message names the port
+     * that could not be used.
+     */
+    static EncodedStream open(int requestedPort, IntConsumer onClients) {
         try {
-            return new EncodedStream(onClients);
+            return new EncodedStream(requestedPort, onClients);
         } catch (IOException | RuntimeException failed) {
-            Log.w(TAG, "no encoded stream on " + PORT + ": " + failed);
+            Log.w(TAG, "no encoded stream on 127.0.0.1:" + requestedPort + ": " + failed);
             return null;
         }
     }
 
-    private EncodedStream(IntConsumer onClients) throws IOException {
+    private EncodedStream(int requestedPort, IntConsumer onClients) throws IOException {
         this.onClients = onClients;
         server = ServerSocketChannel.open();
-        server.bind(new InetSocketAddress(InetAddress.getByName("127.0.0.1"), PORT));
+        server.bind(new InetSocketAddress(InetAddress.getByName("127.0.0.1"), requestedPort));
+        port = ((InetSocketAddress) server.getLocalAddress()).getPort();
         new Thread(this::accept, "screen-stream-encoded-accept").start();
-        Log.i(TAG, "encoded stream on 127.0.0.1:" + PORT);
+        Log.i(TAG, "encoded stream on 127.0.0.1:" + port);
+    }
+
+    /** The port it bound, which is the requested one unless that was 0. */
+    int port() {
+        return port;
     }
 
     /** Points the stream at an encoder, or at none; viewers wait for a keyframe. */
