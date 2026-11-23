@@ -136,6 +136,19 @@ class GrantTests(unittest.TestCase):
         self.assertIsNone(control.granted(self.reply("grant=unknown\n")))
         self.assertIsNone(control.granted(self.reply("state=stopped\n")))
 
+    def test_waiting_for_grant_is_no_grant_even_when_the_appop_is_allowed(self):
+        data = ("state=waiting_for_grant\n"
+                "reason=dialog\n"
+                "grant=no\n"
+                "grant_route=dialog\n"
+                "appop=yes\n"
+                "detail=the app-op is allowed, but this platform still asked\n")
+        reply = self.reply(data, 400)
+        self.assertTrue(control.waiting_for_grant(reply))
+        self.assertFalse(control.granted(reply))
+        self.assertEqual("yes", reply["appop"])
+        self.assertEqual("dialog", reply["grant_route"])
+
     def test_dialog_route_after_a_grant_is_still_granted(self):
         reply = self.reply("state=streaming\ngrant=yes\ngrant_route=dialog\n")
         self.assertTrue(control.granted(reply))

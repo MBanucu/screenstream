@@ -364,12 +364,18 @@ public final class ControlProvider extends ContentProvider {
 
     /** A start whose missing piece is the grant, with the command that supplies it. */
     private static Result waitingForGrant(Context context, int port, String why) {
+        String appOp = Grant.state(context);
         String body = ScreenStream.waitingReport(port, why);
         body = append(body, "reason", "dialog");
-        body = withGrant(body, context);
+        // This is an observed outcome, not a prediction: the start did not get a
+        // token. Report no usable grant even when the app-op is allowed but this
+        // platform ignored it; appop= keeps the underlying setting visible.
+        body = append(body, "grant", Grant.NO);
+        body = append(body, "grant_route", "dialog");
+        body = append(body, "appop", appOp);
         body = append(body, "command", Grant.appOpCommand(context));
         body = append(body, "fallback", DIALOG_FALLBACK);
-        if (Grant.YES.equals(Grant.state(context))) {
+        if (Grant.YES.equals(appOp)) {
             body = append(body, "detail", "the app-op is allowed, but this platform "
                     + "still asked for the projection dialog");
         }

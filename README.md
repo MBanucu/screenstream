@@ -134,8 +134,13 @@ Every `status` and `start` reply also carries `grant=yes|no|unknown` and
 `grant_route=appop|dialog|none|unknown`. `grant=yes` means the projection can be
 issued without a tap: a standing app-op or a capture that is already running.
 `grant=no` means the system would ask, and `unknown` means this build could not be
-asked. `grant` reports the same without starting anything, and adds the
-`command=` that sets the app-op and a `revoke_command=` for after the run:
+asked. A `start` can still answer `state=waiting_for_grant` after `grant=yes`:
+some builds allow the app-op but show the dialog anyway. That reply reports the
+observed outcome as `grant=no`, `grant_route=dialog`, with `appop=yes` and a
+`detail=` line recording that the platform ignored the op. Treat a waiting start
+as no usable grant even if `grant` said yes before it. `grant` reports the same
+without starting anything, and adds the `command=` that sets the app-op and a
+`revoke_command=` for after the run:
 
 ```bash
 python3 client/control.py grant
