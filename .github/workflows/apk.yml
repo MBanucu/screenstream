@@ -100,7 +100,10 @@ jobs:
           VERSION="$version" VERSION_CODE="$version_code" bash build.sh apk
           apksigner verify --print-certs out/screenstream-app.apk | sed -n '1,3p' \
             | tee -a "$GITHUB_STEP_SUMMARY"
-          sha256sum out/screenstream-app.apk > out/screenstream-app.apk.sha256
+          # A downloaded file says which release it is, like the tag does.
+          apk="out/screenstream-$version.apk"
+          cp out/screenstream-app.apk "$apk"
+          sha256sum "$apk" > "$apk.sha256"
 
       - name: Attach to the release
         env:
@@ -109,11 +112,12 @@ jobs:
           set -euo pipefail
           # --clobber so re-running a failed job replaces its own artifact rather
           # than failing on the file it attached before.
-          gh release upload "$TAG" out/screenstream-app.apk \
-            out/screenstream-app.apk.sha256 --clobber
+          version="${TAG#v}"
+          gh release upload "$TAG" "out/screenstream-$version.apk" \
+            "out/screenstream-$version.apk.sha256" --clobber
           {
             echo "### screenstream app $TAG"
             echo '```'
-            cat out/screenstream-app.apk.sha256
+            cat "out/screenstream-$version.apk.sha256"
             echo '```'
           } >>"$GITHUB_STEP_SUMMARY"
