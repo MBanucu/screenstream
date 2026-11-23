@@ -40,9 +40,16 @@ api=35
 android_jar=$sdk/platforms/android-$api/android.jar
 build_tools=$sdk/build-tools/35.0.0
 [ -f "$android_jar" ] || { echo "no $android_jar" >&2; exit 1; }
-for tool in javac d8 python3; do
+for tool in javac python3; do
     command -v "$tool" >/dev/null || { echo "missing $tool" >&2; exit 1; }
 done
+# d8 ships with the build-tools and is not always on PATH (a CI image installs the
+# package and stops there), so it is looked for in both places, like aapt2 below.
+d8=$(command -v d8 || true)
+if [ -z "$d8" ] && [ -x "$build_tools/d8" ]; then
+    d8=$build_tools/d8
+fi
+[ -n "$d8" ] || { echo "missing d8" >&2; exit 1; }
 
 work=$here/out/work
 out=$here/out
@@ -71,7 +78,7 @@ with zipfile.ZipFile(jar, 'w', zipfile.ZIP_DEFLATED) as z:
 EOF
 
 echo "== screenstream $version: d8 (does this jar stand on its own?) =="
-d8 --lib "$android_jar" --min-api 24 --output "$work/dex" "$out/screenstream-$version.jar"
+"$d8" --lib "$android_jar" --min-api 24 --output "$work/dex" "$out/screenstream-$version.jar"
 
 if [ "$mode" = apk ]; then
     # --- app -------------------------------------------------------------------
