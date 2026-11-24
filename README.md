@@ -341,13 +341,16 @@ still brings up a capture on a real Android runtime:
 - It first takes the documented headless consent route: `appops set --uid
   <package> PROJECT_MEDIA allow`, verifies the UID mode with `appops get`, then
   verifies `grant=yes` through the provider, and revokes it in an `EXIT` trap.
-- API 35 still shows the projection dialog after that UID grant. The gate starts
-  the capture in the background, finds the dialog's positive button in a
-  `uiautomator dump`, and taps it with `adb shell input tap`; it does not use
-  fixed coordinates and does not wait for a person. `start` must then prove
+- A content-provider call cannot launch the consent activity from the
+  background on API 35; logcat reports `Background activity launch blocked`.
+  The gate therefore also starts `ScreenStreamActivity` explicitly with adb and
+  the same scale/port extras, which is the documented `am start` path. If the
+  platform still asks for consent, the gate finds the dialog's positive button
+  in a `uiautomator dump` and taps it with `adb shell input tap`; it does not
+  use fixed coordinates and does not wait for a person. `start` must then prove
   `state=streaming` with a bound port, the expected frame size and at least one
-  composited frame. A dump without the button, a dismissed dialog or a
-  `waiting_for_grant` reply fails the run.
+  composited frame. A failed activity launch, a dump without the button, a
+  dismissed dialog or a `waiting_for_grant` reply fails the run.
 - `start --port 0 --scale 2` is the **synchronous control reply** from #1: it
   returns only after the first composited frame, with `state=streaming` and the
   port it bound. The script reads that port; it never polls the state file or

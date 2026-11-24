@@ -195,16 +195,32 @@ log "grant route $GRANT_ROUTE"
 
 # start is synchronous: it answers streaming and the port only after the first
 # composited frame, so there is no state-file poll and no guessed port. On API 35
-# the projection dialog is still shown even when the UID app-op is allowed, so
-# the call runs in the background while the same system button a person would
-# press is found in a uiautomator dump and tapped. The provider still has to
-# prove the grant and the first frame; this does not turn a failed start green.
-log "starting the capture and accepting the projection dialog if the platform asks"
+# a content-provider call cannot start the consent activity from the background
+# (`Background activity launch blocked`), so the gate also starts the documented
+# activity with adb and the same extras. If the platform still asks for consent,
+# the same button a person would press is found in a uiautomator dump and
+# tapped. The provider still has to prove the grant and the first frame; none of
+# this turns a failed start green.
+log "starting the capture and showing the consent activity"
 CAPTURE_ATTEMPTED=1
 control_call start --extra port:i:0 --extra encoded_port:i:0 \
     --extra scale:i:"$SCALE" --extra timeout_ms:i:"$FIRST_FRAME_TIMEOUT_MS" \
     >"$OUT/control-start.log" 2>&1 &
 START_PID=$!
+
+# Let the provider make its (blocked) attempt first; this explicit launch is the
+# path the README documents for adb and the only one allowed from the background.
+sleep 1
+if ! adb -s "$SERIAL" shell am start -W \
+        -n "$PKG/io.github.mbanucu.screenstream.ScreenStreamActivity" \
+        --ei scale "$SCALE" --ei port 0 --ei encoded_port 0 \
+        >"$OUT/activity-start.txt" 2>&1; then
+    cat "$OUT/activity-start.txt" >&2
+    die "could not start the capture activity"
+fi
+cat "$OUT/activity-start.txt"
+grep -q 'Status: ok' "$OUT/activity-start.txt" \
+    || die "the capture activity did not start (see activity-start.txt)"
 
 dialog_tapped=0
 dialog_deadline=$((SECONDS + DIALOG_TIMEOUT))
