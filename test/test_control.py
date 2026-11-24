@@ -111,9 +111,9 @@ class GrantTests(unittest.TestCase):
                 "grant_route=none\n"
                 "package=io.github.mbanucu.screenstream.app\n"
                 "reason=dialog\n"
-                "command=adb shell appops set io.github.mbanucu.screenstream.app "
+                "command=adb shell appops set --uid io.github.mbanucu.screenstream.app "
                 "PROJECT_MEDIA allow\n"
-                "revoke_command=adb shell appops set io.github.mbanucu.screenstream.app "
+                "revoke_command=adb shell appops set --uid io.github.mbanucu.screenstream.app "
                 "PROJECT_MEDIA default\n")
         reply = self.reply(data)
         self.assertFalse(control.granted(reply))
@@ -129,7 +129,7 @@ class GrantTests(unittest.TestCase):
                 "reason=dialog\n"
                 "grant=no\n"
                 "grant_route=none\n"
-                "command=adb shell appops set p PROJECT_MEDIA allow\n"
+                "command=adb shell appops set --uid p PROJECT_MEDIA allow\n"
                 "fallback=accept the system dialog on the device\n")
         reply = self.reply(data, 400)
         self.assertEqual(400, reply.code)

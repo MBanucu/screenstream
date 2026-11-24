@@ -13,8 +13,8 @@ import android.util.Log;
  * a run:
  *
  * <pre>
- * adb shell appops set your.package PROJECT_MEDIA allow
- * adb shell appops set your.package PROJECT_MEDIA default   # revoke
+ * adb shell appops set --uid your.package PROJECT_MEDIA allow
+ * adb shell appops set --uid your.package PROJECT_MEDIA default   # revoke
  * </pre>
  *
  * <p>Where the platform honours it, the dialog is skipped and a harness can start
@@ -121,13 +121,19 @@ final class Grant {
         return context.getPackageName();
     }
 
-    /** The exact command that turns the dialog into a headless grant, run once. */
+    /**
+     * The exact command that turns the dialog into a headless grant, run once.
+     * {@code --uid} is load-bearing: project_media is a security app-op, and the
+     * platform checks the UID mode, not the per-package mode.
+     */
     static String appOpCommand(Context context) {
-        return "adb shell appops set " + packageName(context) + " PROJECT_MEDIA allow";
+        return "adb shell appops set --uid " + packageName(context)
+                + " PROJECT_MEDIA allow";
     }
 
     /** The command that puts the app back to asking through the dialog. */
     static String revokeCommand(Context context) {
-        return "adb shell appops set " + packageName(context) + " PROJECT_MEDIA default";
+        return "adb shell appops set --uid " + packageName(context)
+                + " PROJECT_MEDIA default";
     }
 }

@@ -234,7 +234,7 @@ python3 client/control.py status
 
 Only adb shell, root, system and the app itself may call the provider; any other
 caller gets `code=403` and an `error=` line. The projection dialog is still the
-system's, but there is a headless path: `adb shell appops set <package>
+system's, but there is a headless path: `adb shell appops set --uid <package>
 PROJECT_MEDIA allow` before a run, where the platform honours it. The block below
 does that, verifies it with `grant=yes`, and revokes it afterwards; a dialog
 clicker from an accessibility service remains a fallback, not a requirement. The
@@ -263,7 +263,7 @@ adb install -r out/screenstream-app.apk
 
 # Opt-in, per run: let the platform skip the projection dialog. The app does not
 # ask for this on install and this block revokes it at the end.
-adb shell appops set "$PKG" PROJECT_MEDIA allow
+adb shell appops set --uid "$PKG" PROJECT_MEDIA allow
 grant=$(python3 client/control.py grant)
 printf '%s\n' "$grant"
 printf '%s\n' "$grant" | grep -qx 'grant=yes'          # verification
@@ -280,7 +280,7 @@ mkdir -p out/recordings
 adb pull "/sdcard/Android/data/$PKG/files/recordings/." out/recordings/
 
 # Leave the device asking through the dialog again.
-adb shell appops set "$PKG" PROJECT_MEDIA default
+adb shell appops set --uid "$PKG" PROJECT_MEDIA default
 ```
 
 `grant=yes` is the assertion to make before recording; `grant=no` or
@@ -338,10 +338,11 @@ still brings up a capture on a real Android runtime:
 - The script refuses to pass without an `emulator-*` serial in the `device`
   state, builds the APK with `build.sh apk`, and installs it. A missing emulator
   or a physical phone is a failed run, not a skipped one.
-- It takes the documented headless consent route: `appops set <package>
-  PROJECT_MEDIA allow`, then verifies `grant=yes` through the provider, and
-  revokes it in an `EXIT` trap. If API 35 ignores the op, `start` answers
-  `waiting_for_grant` and the run fails; it does not wait for a person to click.
+- It takes the documented headless consent route: `appops set --uid <package>
+  PROJECT_MEDIA allow`, verifies the UID mode with `appops get`, then verifies
+  `grant=yes` through the provider, and revokes it in an `EXIT` trap. If the
+  platform ignores the op, `start` answers `waiting_for_grant` and the run fails;
+  it does not wait for a person to click.
 - `start --port 0 --scale 2` is the **synchronous control reply** from #1: it
   returns only after the first composited frame, with `state=streaming` and the
   port it bound. The script reads that port; it never polls the state file or
@@ -845,12 +846,14 @@ time. Three ways to answer it, in decreasing order of honesty:
 2. **An accessibility service clicks it.** `ScreenStream.setDialogClicker(runnable)`
    — how the app this was extracted from accepts the dialog, the same interaction a
    screen-reader user performs.
-3. **An app-op, opted into per run.** `adb shell appops set <package> PROJECT_MEDIA
-   allow` makes the system answer without a dialog. Verified here with
-   accessibility off. It is not a documented third-party API, and it is
-   persistent: an app with it can start capturing after any cold start with no
-   user involvement. The headless recipe above sets it immediately before a run
-   and resets it with `appops set <package> PROJECT_MEDIA default` afterwards;
+3. **An app-op, opted into per run.** `adb shell appops set --uid <package>
+   PROJECT_MEDIA allow` makes the system answer without a dialog. The `--uid`
+   is required because project_media is a security app-op, checked by UID rather
+   than by package. Verified here with accessibility off. It is not a documented
+   third-party API, and it is persistent: an app with it can start capturing
+   after any cold start with no user involvement. The headless recipe above sets
+   it immediately before a run and resets it with `appops set --uid <package>
+   PROJECT_MEDIA default` afterwards;
    the app never sets it and installs with no grant. `grant` reports whether it is
    in force and `status` reports `grant=yes|no|unknown`, so a harness can refuse to
    record blind. A standing grant is fine for a test phone, wrong for anything
