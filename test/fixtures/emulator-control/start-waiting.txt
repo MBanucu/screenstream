@@ -24,7 +24,7 @@ reason=dialog
 grant=no
 grant_route=dialog
 appop=yes
-command=adb shell appops set io.github.mbanucu.screenstream.app PROJECT_MEDIA allow
+command=adb shell appops set --uid io.github.mbanucu.screenstream.app PROJECT_MEDIA allow
 fallback=accept the system dialog on the device
 detail=the app-op is allowed, but this platform still asked for the projection dialog
 }]

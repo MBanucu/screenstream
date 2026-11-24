@@ -78,6 +78,9 @@ cleanup() {
             adb -s "$SERIAL" shell content call --uri "$AUTH" --method stop \
                 >>"$OUT/control-stop-cleanup.txt" 2>&1
         fi
+        adb -s "$SERIAL" shell appops set --uid "$PKG" PROJECT_MEDIA default \
+            >>"$OUT/appops-revoke.txt" 2>&1
+        # Clear a package-mode grant an older recipe may have left behind too.
         adb -s "$SERIAL" shell appops set "$PKG" PROJECT_MEDIA default \
             >>"$OUT/appops-revoke.txt" 2>&1
     fi
@@ -147,8 +150,19 @@ grep -q 'Success' "$OUT/install.txt" \
 # the EXIT trap. If the platform ignores the op, start answers
 # waiting_for_grant and the run fails instead of recording a black video.
 log "granting PROJECT_MEDIA for this run"
-adb -s "$SERIAL" shell appops set "$PKG" PROJECT_MEDIA allow \
+# project_media is a security app-op, so it is checked by UID. `--uid` sets the
+# UID mode; setting only the per-package mode leaves the check at MODE_DEFAULT.
+adb -s "$SERIAL" shell appops set --uid "$PKG" PROJECT_MEDIA allow \
     >"$OUT/appops-allow.txt" 2>&1
+if ! adb -s "$SERIAL" shell appops get --uid "$PKG" PROJECT_MEDIA \
+        >"$OUT/appops-get.txt" 2>&1; then
+    cat "$OUT/appops-get.txt" >&2
+    die "could not read PROJECT_MEDIA back after setting it"
+fi
+cat "$OUT/appops-get.txt"
+if ! grep -q 'PROJECT_MEDIA: allow' "$OUT/appops-get.txt"; then
+    die "PROJECT_MEDIA is not allowed for the app UID; see appops-get.txt"
+fi
 
 control_call() {
     local method=$1
