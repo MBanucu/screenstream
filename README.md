@@ -518,7 +518,14 @@ that was removed there):
 
 ```bash
 gradle :assembleRelease          # build/outputs/aar/screenstream-release.aar
+gradle checkBuildEnv             # JDK, SDK, compileSdk and aapt2, in one message
+tools/termux-build.sh            # the same build, with the checks and caches
 ```
+
+Versions and SDK levels live in `gradle/libs.versions.toml`; `build.sh`,
+`publish.sh` and the CI workflows read the same file through
+`tools/versions.py`, so AGP 9.5.2, compileSdk 35 and the project version are not
+copied between scripts.
 
 The two produce the same library, checked rather than assumed: the AAR holds the
 same 12 classes and 179 `javap` signature lines, with the manifest's permissions,
@@ -526,16 +533,20 @@ activity and service intact. The class bytes differ because the two invoke javac
 differently, and the Gradle AAR carries `aar-metadata.properties`.
 
 `./gradlew` is checked in, so a machine with nothing but a JDK can build it: the
-wrapper downloads Gradle 9.9.2 itself. There is also CI — `.github/workflows/ci.yml`
-runs the host-side tests (control, wire format and fMP4), installs the client and
-checks both console scripts, builds both ways on ubuntu and then fails if the two
-artifacts expose different APIs (compared with `javap`, not by trusting that they
-compile). `.github/workflows/release.yml` publishes a release. Its Maven job runs
-`publish.sh` itself rather than a second publishing path, given the four secrets
-`SIGNING_KEY`, `SIGNING_PASSWORD`, `MAVEN_CENTRAL_USERNAME`,
-`MAVEN_CENTRAL_PASSWORD` — which do not exist in this repository yet, so the
-first release run stops at the step that checks for them. Its PyPI job publishes
-the client with trusted publishing, described under "Publishing: PyPI" above.
+wrapper downloads Gradle 9.9.2 itself, and `distributionSha256Sum` in
+`gradle-wrapper.properties` pins the archive. CI validates the wrapper JAR as
+well. There is also CI — `.github/workflows/ci.yml` runs the host-side tests
+(control, wire format and fMP4), installs the client and checks both console
+scripts, builds both ways on ubuntu and then fails if the two artifacts expose
+different APIs (compared with `javap`, not by trusting that they compile). It has
+an opt-in self-hosted Termux job (repository variable `TERMUX_RUNNER=true`) and
+`tools/termux-build.sh` for the phone itself. `.github/workflows/release.yml`
+publishes a release. Its Maven job runs `publish.sh` itself rather than a second
+publishing path, given the four secrets `SIGNING_KEY`, `SIGNING_PASSWORD`,
+`MAVEN_CENTRAL_USERNAME`, `MAVEN_CENTRAL_PASSWORD` — which do not exist in this
+repository yet, so the first release run stops at the step that checks for them.
+Its PyPI job publishes the client with trusted publishing, described under
+"Publishing: PyPI" above.
 
 What Gradle adds is what a publication wants rather than what a build needs:
 module metadata (`.module`, which is how a Gradle consumer resolves the AAR without
@@ -545,7 +556,10 @@ a consumer, and a project an IDE or JitPack can open. It costs the first run abo
 downloads; `build.sh` remains the path with no downloads at all. Two things it
 needs on this device are already in place: `android.aapt2FromMavenOverride` in
 `~/.gradle/gradle.properties` points AGP at Termux's own aapt2, and
-`local.properties` (ignored by git) names the SDK.
+`local.properties` (ignored by git) names the SDK. `local.properties.example` is
+the template; `docs/termux-build.md` has the full setup, the measured
+configuration/build-cache times and the upstream warnings that are deliberately
+not ours.
 
 ## Publishing: Maven Central, for the library
 

@@ -1,0 +1,24 @@
+# The single source of truth for the Gradle build's versions and SDK levels.
+#
+# build.sh and publish.sh read this file through tools/versions.py, so a release
+# version or an SDK level changes here and nowhere else. The client's
+# client/pyproject.toml carries the same project version; test/test_client.py
+# fails if they disagree.
+[versions]
+# AGP 9.x is the line that runs on Gradle 9.6+, which is what Termux packages.
+agp = "9.5.2"
+
+# Android SDK levels. build.sh reads these too.
+compileSdk = "35"
+minSdk = "24"
+buildTools = "35.0.0"
+
+# The Java language level for javac and for the library's API.
+java = "17"
+
+# The AAR, APK and client version. -Pversion=... still overrides it for a
+# publication or a release job.
+projectVersion = "0.2.0"
+
+[plugins]
+android-library = { id = "com.android.library", version.ref = "agp" }

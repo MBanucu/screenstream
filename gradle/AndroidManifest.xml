@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The library's own manifest. Gradle merges it into an app that depends on the
+     AAR, so a consumer adds no declarations of its own; a build without a manifest
+     merger, the way samples/build.sh links it, copies these elements into the
+     app's manifest instead. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- The stream is served on 127.0.0.1, which still needs the socket permission. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+
+    <application>
+
+        <!-- Asks for the screen once, then hands it to the service. Started by the
+             app itself, by adb, or not at all if the app asks for the projection
+             on its own and calls ScreenStream.start. -->
+        <activity
+            android:name=".ScreenStreamActivity"
+            android:exported="true"
+            android:label="Screen stream" />
+
+        <!-- Raw frames on 127.0.0.1:7100, for apps and for `adb forward`. -->
+        <service
+            android:name=".ScreenStream"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
+
+        <!-- The synchronous control surface: `adb shell content call` against this
+             authority starts, stops and reports the stream. It is exported because
+             adb shell is a different uid, and checks its caller inside; a provider
+             is started on demand, so status answers even before the app ran. -->
+        <provider
+            android:name=".ControlProvider"
+            android:authorities="io.github.mbanucu.screenstream.control"
+            android:exported="true" />
+    </application>
+</manifest>

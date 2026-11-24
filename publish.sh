@@ -9,6 +9,7 @@
 #   bash publish.sh --status <id>       # how did deployment <id> go?
 #   bash publish.sh --publish <id>      # release a validated, USER_MANAGED deployment
 #   VERSION=0.2.0 PGP_KEY=0xABCD bash publish.sh
+#   (VERSION defaults to gradle/libs.versions.toml's projectVersion.)
 #
 # Environment:
 #   PGP_KEY            key to sign with (default: gpg's default secret key)
@@ -35,7 +36,7 @@
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
-version=${VERSION:-0.1.0}
+version=${VERSION:-$(python3 "$here/tools/versions.py" projectVersion)}
 group=io.github.mbanucu
 artifact_id=screenstream
 portal=${PORTAL:-https://central.sonatype.com}

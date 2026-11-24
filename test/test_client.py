@@ -8,6 +8,7 @@ frames in one read, a header that stops halfway - are deterministic here.
 
 import re
 import struct
+import subprocess
 import sys
 import time
 import unittest
@@ -157,15 +158,19 @@ class VersionTests(unittest.TestCase):
         self.assertIsNotNone(match, "no version in client/pyproject.toml")
         pyproject_version = match.group(1)
 
-        gradle = (ROOT / "build.gradle.kts").read_text()
-        gradle_version = re.search(
-            r'getOrElse\("([^"]+)"\)', gradle).group(1)
-        script = (ROOT / "build.sh").read_text()
-        script_version = re.search(
-            r'version=\$\{VERSION:-([^}]+)\}', script).group(1)
+        # The version catalog is the build's single source; the helper is what
+        # build.sh and publish.sh use, so this checks the real path rather than a
+        # copied literal.
+        catalog_version = subprocess.check_output(
+            [sys.executable, str(ROOT / "tools" / "versions.py"), "projectVersion"],
+            text=True).strip()
+        self.assertEqual(pyproject_version, catalog_version)
 
-        self.assertEqual(pyproject_version, gradle_version)
-        self.assertEqual(pyproject_version, script_version)
+        gradle = (ROOT / "build.gradle.kts").read_text()
+        self.assertIn("libs.versions.projectVersion.get()", gradle)
+        self.assertNotRegex(gradle, r'getOrElse\("0\.\d+\.\d+"\)')
+        script = (ROOT / "build.sh").read_text()
+        self.assertIn('toml_value projectVersion', script)
 
     def test_the_client_speaks_the_javas_header_version(self):
         java = (ROOT / "src/main/java/io/github/mbanucu/screenstream/"

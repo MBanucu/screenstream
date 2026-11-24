@@ -6,7 +6,7 @@
 #   bash build.sh              # library: out/screenstream-<version>.aar, .jar, -sources.jar,
 #                              #          -javadoc.jar, .pom
 #   bash build.sh apk          # app: out/screenstream-app.apk, installable and driven by adb
-#   VERSION=0.2.0 bash build.sh
+#   VERSION=x.y.z bash build.sh
 #
 # The APK is signed with the debug key unless a release key is given; a released
 # APK has to be signed with the same key as the one it updates, so a release job
@@ -35,9 +35,16 @@ set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
 mode=${1:-library}
-version=${VERSION:-0.2.0}
+command -v python3 >/dev/null || { echo "missing python3" >&2; exit 1; }
+# The version catalog is the one place these numbers live; tools/versions.py
+# reads it without Gradle or Python 3.11's tomllib.
+toml_value() { python3 "$here/tools/versions.py" "$1"; }
+version=${VERSION:-$(toml_value projectVersion)}
 version_code=${VERSION_CODE:-1}
 sources=$here/src/main/java
+api=$(toml_value compileSdk)
+min_sdk=$(toml_value minSdk)
+java=$(toml_value java)
 
 sdk=""
 for candidate in "${ANDROID_HOME:-}" "${ANDROID_SDK_ROOT:-}" "$HOME/android-sdk" /usr/lib/android-sdk; do
@@ -47,11 +54,10 @@ for candidate in "${ANDROID_HOME:-}" "${ANDROID_SDK_ROOT:-}" "$HOME/android-sdk"
     fi
 done
 [ -n "$sdk" ] || { echo "no Android SDK found (ANDROID_HOME, ANDROID_SDK_ROOT, ~/android-sdk)" >&2; exit 1; }
-api=35
 android_jar=$sdk/platforms/android-$api/android.jar
-build_tools=$sdk/build-tools/35.0.0
+build_tools=$sdk/build-tools/$(toml_value buildTools)
 [ -f "$android_jar" ] || { echo "no $android_jar" >&2; exit 1; }
-for tool in javac python3; do
+for tool in javac; do
     command -v "$tool" >/dev/null || { echo "missing $tool" >&2; exit 1; }
 done
 # d8 ships with the build-tools and is not always on PATH (a CI image installs the
@@ -76,7 +82,7 @@ if [ "$mode" = apk ] && [ -d "$here/app/src" ]; then
     mapfile -t app_files < <(find "$here/app/src" -name '*.java')
     files+=("${app_files[@]}")
 fi
-javac -nowarn --release 17 -classpath "$android_jar" -d "$work/classes" "${files[@]}"
+javac -nowarn --release "$java" -classpath "$android_jar" -d "$work/classes" "${files[@]}"
 
 python3 - "$work/classes" "$out/screenstream-$version.jar" <<'EOF'
 import os, sys, zipfile
@@ -89,7 +95,7 @@ with zipfile.ZipFile(jar, 'w', zipfile.ZIP_DEFLATED) as z:
 EOF
 
 echo "== screenstream $version: d8 (does this jar stand on its own?) =="
-"$d8" --lib "$android_jar" --min-api 24 --output "$work/dex" "$out/screenstream-$version.jar"
+"$d8" --lib "$android_jar" --min-api "$min_sdk" --output "$work/dex" "$out/screenstream-$version.jar"
 
 if [ "$mode" = apk ]; then
     # --- app -------------------------------------------------------------------
@@ -102,7 +108,7 @@ if [ "$mode" = apk ]; then
     aapt2 link -o "$work/base.apk" \
         -I "$android_jar" \
         --manifest "$here/app/AndroidManifest.xml" \
-        --min-sdk-version 24 --target-sdk-version "$api" \
+        --min-sdk-version "$min_sdk" --target-sdk-version "$api" \
         --version-code "$version_code" --version-name "$version"
 
     echo "== screenstream app: package =="
@@ -169,7 +175,7 @@ EOF
 # reference android.*, so the docs need android.jar on the classpath as well.
 echo "== screenstream $version: javadoc =="
 mkdir -p "$work/javadoc"
-javadoc -quiet -Xdoclint:none --release 17 -classpath "$android_jar" \
+javadoc -quiet -Xdoclint:none --release "$java" -classpath "$android_jar" \
     -windowtitle "screenstream $version" -doctitle "screenstream $version" \
     -d "$work/javadoc" "${files[@]}"
 python3 - "$work/javadoc" "$out/screenstream-$version-javadoc.jar" <<'EOF'
