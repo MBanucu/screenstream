@@ -1,0 +1,30 @@
+Result: Bundle[{code=400, data=state=waiting_for_grant
+why=no capture started within 60000 ms; the projection dialog was not answered
+port=0
+protocol=2.0
+size=0x0
+scale=1
+format=rgba8888
+frames_looked=0
+frames_changed=0
+frames_sent=0
+frames_skipped=0
+clients=0
+taps=0
+recording=-
+recorded_frames=0
+recorded_ms=0
+recording_from_ns=0
+encoded_port=-
+encoded_clients=0
+encoded_frames=0
+encoded_bytes=0
+encoder=-
+reason=dialog
+grant=no
+grant_route=dialog
+appop=yes
+command=adb shell appops set io.github.mbanucu.screenstream.app PROJECT_MEDIA allow
+fallback=accept the system dialog on the device
+detail=the app-op is allowed, but this platform still asked for the projection dialog
+}]

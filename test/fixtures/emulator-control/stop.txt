@@ -1,0 +1,24 @@
+Result: Bundle[{code=0, data=state=stopped
+port=43127
+protocol=2.0
+size=720x1600
+scale=2
+format=rgba8888
+frames_looked=24
+frames_changed=9
+frames_sent=9
+frames_skipped=0
+clients=0
+taps=0
+recording=-
+recorded_frames=9
+recorded_ms=800
+recording_from_ns=900000000
+encoded_port=-
+encoded_clients=0
+encoded_frames=0
+encoded_bytes=0
+encoder=-
+grant=yes
+grant_route=appop
+}]

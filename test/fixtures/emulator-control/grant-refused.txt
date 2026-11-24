@@ -1,0 +1,8 @@
+Result: Bundle[{code=0, data=grant=no
+grant_route=none
+package=io.github.mbanucu.screenstream.app
+reason=dialog
+command=adb shell appops set io.github.mbanucu.screenstream.app PROJECT_MEDIA allow
+fallback=accept the system dialog on the device
+revoke_command=adb shell appops set io.github.mbanucu.screenstream.app PROJECT_MEDIA default
+}]

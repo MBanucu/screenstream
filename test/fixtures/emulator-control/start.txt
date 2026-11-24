@@ -1,0 +1,24 @@
+Result: Bundle[{code=0, data=state=streaming
+port=43127
+protocol=2.0
+size=720x1600
+scale=2
+format=rgba8888
+frames_looked=8
+frames_changed=3
+frames_sent=0
+frames_skipped=0
+clients=0
+taps=0
+recording=-
+recorded_frames=0
+recorded_ms=0
+recording_from_ns=0
+encoded_port=43128
+encoded_clients=0
+encoded_frames=0
+encoded_bytes=0
+encoder=-
+grant=yes
+grant_route=appop
+}]
