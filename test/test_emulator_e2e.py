@@ -219,8 +219,10 @@ class ShellPreflightTests(unittest.TestCase):
         bin_dir = Path(directory) / "bin"
         bin_dir.mkdir()
         fake = bin_dir / "adb"
+        # /bin/sh, not /usr/bin/env: Termux has no /usr/bin/env, and these
+        # tests are meant to run there as well as on the hosted runner.
         fake.write_text(
-            "#!/usr/bin/env bash\n"
+            "#!/bin/sh\n"
             "printf 'List of devices attached\\n'\n"
             "printf '%s\\n' \"${FAKE_DEVICES:-}\"\n"
             "printf '\\n'\n",
