@@ -28,6 +28,7 @@ import streamtest  # noqa: E402
 FIXTURES = HERE / "fixtures" / "emulator-control"
 SCRIPT = ROOT / "ci" / "emulator-e2e.sh"
 DISPLAY_SCRIPT = ROOT / "ci" / "emulator-display-profile.sh"
+PROJECTION_DIALOG = HERE / "fixtures" / "projection-dialog.xml"
 
 
 def fixture(name):
@@ -210,6 +211,40 @@ class CollectionTests(unittest.TestCase):
         with self.assertRaises(probe.ProbeError):
             probe.collect_after_change(
                 client.Connection(sock), sock.release, timeout=0.2, quiet=0.05)
+
+
+class ProjectionDialogTests(unittest.TestCase):
+    def test_the_positive_button_is_found_by_resource_id(self):
+        self.assertEqual((360, 1600), probe.dialog_tap(
+            PROJECTION_DIALOG.read_text(encoding="utf-8")))
+
+    def test_the_button_can_be_found_by_text_without_a_resource_id(self):
+        xml = ("<hierarchy><node text=\"Start now\" "
+               "bounds=\"[10,20][30,60]\" /></hierarchy>")
+        self.assertEqual((20, 40), probe.dialog_tap(xml))
+
+    def test_a_dump_without_an_accept_button_is_refused(self):
+        xml = ("<hierarchy><node text=\"Cancel\" "
+               "resource-id=\"android:id/button2\" "
+               "bounds=\"[10,20][30,60]\" /></hierarchy>")
+        with self.assertRaises(probe.ProbeError):
+            probe.dialog_tap(xml)
+
+    def test_the_cli_prints_only_the_tap_point(self):
+        done = subprocess.run(
+            [sys.executable, str(ROOT / "ci" / "emulator_probe.py"), "dialog",
+             "--xml", str(PROJECTION_DIALOG)],
+            capture_output=True, text=True, timeout=30)
+        self.assertEqual(0, done.returncode, done.stderr)
+        self.assertEqual("360 1600", done.stdout.strip())
+
+    def test_the_cli_fails_without_a_dialog(self):
+        done = subprocess.run(
+            [sys.executable, str(ROOT / "ci" / "emulator_probe.py"), "dialog",
+             "--xml", "-"], input="<hierarchy />",
+            capture_output=True, text=True, timeout=30)
+        self.assertNotEqual(0, done.returncode)
+        self.assertIn("no projection-dialog accept button", done.stderr)
 
 
 class ShellPreflightTests(unittest.TestCase):
