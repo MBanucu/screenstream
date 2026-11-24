@@ -97,13 +97,17 @@ uses AGP's own aapt2 and does not need the override.
 ```bash
 tools/termux-build.sh
 # or, for the same tasks by hand:
-gradle --offline checkBuildEnv :assembleRelease --configuration-cache --build-cache
+gradle --offline checkBuildEnv :assembleRelease \
+    :android-control-surface:assembleRelease --configuration-cache --build-cache
+gradle --offline :android-control-surface:test   # device-free JVM tests
 ```
 
-The AAR is at `build/outputs/aar/screenstream-release.aar`. The first build on a
-new machine needs network for AGP and its dependencies; `OFFLINE=0
-tools/termux-build.sh` allows that. After the dependency cache is warm,
-`--offline` is the normal path.
+The AARs are at `build/outputs/aar/screenstream-release.aar` and
+`android-control-surface/build/outputs/aar/android-control-surface-release.aar`.
+The first build on a new machine needs network for AGP and its dependencies; the
+control-surface JVM tests also fetch JUnit once (afterwards they run offline).
+`OFFLINE=0 tools/termux-build.sh` allows a networked build. After the dependency
+cache is warm, `--offline` is the normal path.
 
 Termux's Gradle daemon cannot adopt a client's environment (Gradle reports that
 there is no native integration for it), so a daemon started before `ANDROID_HOME`
@@ -227,8 +231,11 @@ repository's Gradle 10 deprecations. What remains:
 
 ```bash
 gradle --offline publishToMavenLocal -Pversion=0.0.0-smoke
+gradle --offline :android-control-surface:publishToMavenLocal -Pversion=0.0.0-smoke
 ls ~/.m2/repository/io/github/mbanucu/screenstream/0.0.0-smoke/
+ls ~/.m2/repository/io/github/mbanucu/android-control-surface/0.0.0-smoke/
 rm -rf ~/.m2/repository/io/github/mbanucu/screenstream/0.0.0-smoke
+rm -rf ~/.m2/repository/io/github/mbanucu/android-control-surface/0.0.0-smoke
 
 # The Gradle bundle, signed with a throwaway key and never uploaded:
 gnupg=$(mktemp -d)
@@ -237,6 +244,8 @@ GNUPGHOME="$gnupg" gpg --batch --passphrase '' --quick-generate-key \
 fpr=$(GNUPGHOME="$gnupg" gpg --list-secret-keys --with-colons |
       awk -F: '/^fpr/ {print $10; exit}')
 GNUPGHOME="$gnupg" GRADLE_PUBLISH=1 VERSION=0.0.0-smoke PGP_KEY="$fpr" bash publish.sh
+GNUPGHOME="$gnupg" ARTIFACT=android-control-surface VERSION=0.0.0-smoke \
+    PGP_KEY="$fpr" bash publish.sh
 rm -rf "$gnupg"
 ```
 

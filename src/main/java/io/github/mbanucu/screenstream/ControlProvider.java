@@ -1,21 +1,16 @@
 package io.github.mbanucu.screenstream;
 
-import android.content.ContentProvider;
-import android.content.ContentValues;
 import android.content.Context;
 import android.content.Intent;
-import android.database.Cursor;
-import android.net.Uri;
-import android.os.Binder;
-import android.os.Bundle;
-import android.os.Process;
 import android.os.SystemClock;
-import android.util.Log;
 
 import java.io.File;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
+
+import io.github.mbanucu.control.Args;
+import io.github.mbanucu.control.Reply;
 
 /**
  * The stream's synchronous control surface, for a shell and for automation.
@@ -56,19 +51,18 @@ import java.util.Locale;
  * index). {@code grant} changes nothing: the app-op is set by adb, not by an app
  * that has no shell identity.
  *
- * <p>Only adb shell, root, system and the app itself may call it. A provider is
- * used rather than a broadcast because the platform starts it on demand, even for
- * a fresh process after a reboot, which is what makes {@code status} answer
- * {@code state=stopped} without the app having been launched first.
+ * <p>Only adb shell, root, system and the app itself may call it; that gate, the
+ * reply format and the escaping live in {@code io.github.mbanucu.control} (the
+ * {@code android-control-surface} AAR), so another app's provider is the same
+ * code rather than a copy. This app has no token: its surface is for a shell.
+ * A provider is used rather than a broadcast because the platform starts it on
+ * demand, even for a fresh process after a reboot, which is what makes
+ * {@code status} answer {@code state=stopped} without the app having been
+ * launched first.
  */
-public final class ControlProvider extends ContentProvider {
+public final class ControlProvider extends io.github.mbanucu.control.ControlProvider {
 
     public static final String AUTHORITY = "io.github.mbanucu.screenstream.control";
-
-    private static final String TAG = "ScreenStream";
-    private static final int UID_ROOT = 0;
-    private static final int UID_SYSTEM = 1000;
-    private static final int UID_SHELL = 2000;
 
     /** Long enough for a person to answer the projection dialog, short enough to fail. */
     private static final int START_TIMEOUT_MS = 20_000;
@@ -86,37 +80,26 @@ public final class ControlProvider extends ContentProvider {
     private static final Object CONTROL = new Object();
 
     @Override
-    public boolean onCreate() {
-        return true;
+    protected String usage() {
+        return "status, grant, start, stop, record or recording";
     }
 
     @Override
-    public Bundle call(String method, String arg, Bundle extras) {
-        int sender = Binder.getCallingUid();
-        Result result = handle(getContext(), sender, method,
-                extras == null ? Bundle.EMPTY : extras);
-        return reply(result.code, result.data);
+    protected String refusal() {
+        return "refused: the control surface is for adb shell, root, system or the app itself";
     }
 
-    static Result handle(Context context, int sender, String method, Bundle extras) {
-        Bundle in = extras == null ? Bundle.EMPTY : extras;
-        if (!allowed(sender)) {
-            Log.w(TAG, "control: refused uid " + sender + " for " + method);
-            return new Result(403, "error=refused: the control surface is for adb shell, "
-                    + "root, system or the app itself");
-        }
-        if (method == null) {
-            return new Result(400, "error=missing method; use status, grant, start, stop, "
-                    + "record or recording");
-        }
+    @Override
+    protected Reply handle(String method, Args extras) {
+        Context context = getContext();
         switch (method) {
             case "status":
-                return new Result(0, withGrant(ScreenStream.report(), context));
+                return Reply.of(0, withGrant(ScreenStream.report(), context));
             case "grant":
-                return new Result(0, grant(context));
+                return Reply.of(0, grant(context));
             case "start":
                 synchronized (CONTROL) {
-                    return start(context, in);
+                    return start(context, extras);
                 }
             case "stop":
                 synchronized (CONTROL) {
@@ -131,15 +114,10 @@ public final class ControlProvider extends ContentProvider {
                     return stopRecording();
                 }
             default:
-                return new Result(400, "error=unknown method " + ScreenStream.oneLine(method)
-                        + "; use status, grant, start, stop, record or recording");
+                // The base turns null into the same 400 unknown-method sentence
+                // this provider has always returned.
+                return null;
         }
-    }
-
-    /** Shell, root, system and this app's own uid; no token, this app has no secrets. */
-    private static boolean allowed(int uid) {
-        return uid == UID_ROOT || uid == UID_SYSTEM || uid == UID_SHELL
-                || uid == Process.myUid();
     }
 
     /**
@@ -157,9 +135,9 @@ public final class ControlProvider extends ContentProvider {
      * with the command that would grant it: the caller is never told a black
      * capture is a working stream.
      */
-    private static Result start(Context context, Bundle extras) {
-        int port = intExtra(extras, ScreenStream.EXTRA_PORT, ScreenStream.PORT);
-        int encodedPort = intExtra(extras, ScreenStream.EXTRA_ENCODED_PORT, EncodedStream.PORT);
+    private static Reply start(Context context, Args extras) {
+        int port = extras.intValue(ScreenStream.EXTRA_PORT, ScreenStream.PORT);
+        int encodedPort = extras.intValue(ScreenStream.EXTRA_ENCODED_PORT, EncodedStream.PORT);
         if (port < 0 || port > 65535) {
             return failed(context, port,
                     "port must be 0 (ephemeral) or 1..65535, not " + port);
@@ -173,8 +151,8 @@ public final class ControlProvider extends ContentProvider {
                     "the raw and encoded streams cannot share port " + port);
         }
 
-        int scale = Math.max(1, intExtra(extras, ScreenStream.EXTRA_SCALE, 1));
-        int timeout = intExtra(extras, "timeout_ms", START_TIMEOUT_MS);
+        int scale = Math.max(1, extras.intValue(ScreenStream.EXTRA_SCALE, 1));
+        int timeout = extras.intValue("timeout_ms", START_TIMEOUT_MS);
         timeout = Math.max(1000, Math.min(MAX_START_TIMEOUT_MS, timeout));
         long deadline = SystemClock.elapsedRealtime() + timeout;
         // The op in force before the dialog is asked for is what decides the
@@ -188,7 +166,7 @@ public final class ControlProvider extends ContentProvider {
         // given the same timeout as a fresh start instead of being called a stream.
         if (ScreenStream.live()) {
             if (waitForFirstFrame(deadline)) {
-                return new Result(0, withGrant(ScreenStream.report(), context));
+                return Reply.of(0, withGrant(ScreenStream.report(), context));
             }
             String why = ScreenStream.live()
                     ? "the capture is live on port " + ScreenStream.port()
@@ -202,7 +180,7 @@ public final class ControlProvider extends ContentProvider {
                 .putExtra(ScreenStream.EXTRA_SCALE, scale)
                 .putExtra(ScreenStream.EXTRA_PORT, port)
                 .putExtra(ScreenStream.EXTRA_ENCODED_PORT, encodedPort);
-        if (booleanExtra(extras, "record", false)) {
+        if (extras.booleanValue("record", false)) {
             ask.putExtra("record", true);
         }
         try {
@@ -215,7 +193,7 @@ public final class ControlProvider extends ContentProvider {
         while (SystemClock.elapsedRealtime() < deadline) {
             if (ScreenStream.live() && ScreenStream.framesLooked() > 0) {
                 ScreenStream.noteGrantRoute(Grant.startRoute(appOp));
-                return new Result(0, withGrant(ScreenStream.report(), context));
+                return Reply.of(0, withGrant(ScreenStream.report(), context));
             }
             String failure = ScreenStream.startFailure();
             if (failure != null) {
@@ -223,7 +201,7 @@ public final class ControlProvider extends ContentProvider {
                     return waitingForGrant(context, port, failure);
                 }
                 String body = ScreenStream.report();
-                return new Result(400, body.startsWith("state=failed")
+                return Reply.of(400, body.startsWith("state=failed")
                         ? withGrant(body, context)
                         : withGrant(ScreenStream.failureReport(port, failure), context));
             }
@@ -262,7 +240,7 @@ public final class ControlProvider extends ContentProvider {
     }
 
     /** Ends the capture and waits for the service, and any recording, to finish. */
-    private static Result stop(Context context) {
+    private static Reply stop(Context context) {
         boolean wasRecording = ScreenStream.recording();
         File recording = ScreenStream.recordingFile();
         // onDestroy finalises a running recording and blocks until the index is
@@ -271,7 +249,7 @@ public final class ControlProvider extends ContentProvider {
         long deadline = SystemClock.elapsedRealtime() + STOP_TIMEOUT_MS;
         while (!ScreenStream.serviceStopped()) {
             if (SystemClock.elapsedRealtime() > deadline) {
-                return new Result(400, ScreenStream.failureReport(ScreenStream.port(),
+                return Reply.of(400, ScreenStream.failureReport(ScreenStream.port(),
                         "the capture did not stop within " + STOP_TIMEOUT_MS + " ms"));
             }
             if (!sleep(POLL_MS)) {
@@ -282,42 +260,42 @@ public final class ControlProvider extends ContentProvider {
         if (wasRecording && recording != null) {
             body = append(body, "recording_file", recording.getAbsolutePath());
         }
-        return new Result(0, body);
+        return Reply.of(0, body);
     }
 
     /** Starts recording the running capture; a second call returns the file already open. */
-    private static Result record(Context context) {
+    private static Reply record(Context context) {
         if (!ScreenStream.live()) {
-            return new Result(400, "state=stopped\nerror=nothing is streaming; start it first");
+            return Reply.of(400, "state=stopped\nerror=nothing is streaming; start it first");
         }
         if (ScreenStream.recording()) {
-            return new Result(0, ScreenStream.report());
+            return Reply.of(0, ScreenStream.report());
         }
         File directory = context.getExternalFilesDir("recordings");
         if (directory == null || (!directory.isDirectory() && !directory.mkdirs())) {
-            return new Result(400, appendError(ScreenStream.report(),
+            return Reply.of(400, appendError(ScreenStream.report(),
                     "no recordings directory on this device"));
         }
         String name = "screen-" + new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US)
                 .format(new Date()) + ".mp4";
         File file = new File(directory, name);
         if (!ScreenStream.record(file)) {
-            return new Result(400, appendError(ScreenStream.report(),
+            return Reply.of(400, appendError(ScreenStream.report(),
                     "could not start recording to " + file));
         }
-        return new Result(0, ScreenStream.report());
+        return Reply.of(0, ScreenStream.report());
     }
 
     /** Stops the recording and waits for the MP4 index, then names the file it wrote. */
-    private static Result stopRecording() {
+    private static Reply stopRecording() {
         if (!ScreenStream.recording() && !ScreenStream.recordingFinalizing()) {
-            return new Result(400, appendError(ScreenStream.report(), "not recording"));
+            return Reply.of(400, appendError(ScreenStream.report(), "not recording"));
         }
         ScreenStream.stopRecording();
         long deadline = SystemClock.elapsedRealtime() + RECORD_TIMEOUT_MS;
         while (ScreenStream.recording() || ScreenStream.recordingFinalizing()) {
             if (SystemClock.elapsedRealtime() > deadline) {
-                return new Result(400, appendError(ScreenStream.report(),
+                return Reply.of(400, appendError(ScreenStream.report(),
                         "the recording did not finish within " + RECORD_TIMEOUT_MS + " ms"));
             }
             if (!sleep(POLL_MS)) {
@@ -329,7 +307,7 @@ public final class ControlProvider extends ContentProvider {
         if (file != null) {
             body = append(body, "recording_file", file.getAbsolutePath());
         }
-        return new Result(0, body);
+        return Reply.of(0, body);
     }
 
     /**
@@ -363,7 +341,7 @@ public final class ControlProvider extends ContentProvider {
     }
 
     /** A start whose missing piece is the grant, with the command that supplies it. */
-    private static Result waitingForGrant(Context context, int port, String why) {
+    private static Reply waitingForGrant(Context context, int port, String why) {
         String appOp = Grant.state(context);
         String body = ScreenStream.waitingReport(port, why);
         body = append(body, "reason", "dialog");
@@ -379,16 +357,16 @@ public final class ControlProvider extends ContentProvider {
             body = append(body, "detail", "the app-op is allowed, but this platform "
                     + "still asked for the projection dialog");
         }
-        return new Result(400, body);
+        return Reply.of(400, body);
     }
 
-    private static Result failed(Context context, int port, String why) {
-        return new Result(400, withGrant(ScreenStream.failureReport(port, why), context));
+    private static Reply failed(Context context, int port, String why) {
+        return Reply.of(400, withGrant(ScreenStream.failureReport(port, why), context));
     }
 
     /** Keeps an extra field on one line so the reply stays parseable. */
     private static String append(String body, String key, String value) {
-        String line = key + "=" + ScreenStream.oneLine(value);
+        String line = key + "=" + Reply.oneLine(value);
         return body.endsWith("\n") ? body + line + "\n" : body + "\n" + line + "\n";
     }
 
@@ -404,83 +382,5 @@ public final class ControlProvider extends ContentProvider {
             Thread.currentThread().interrupt();
             return false;
         }
-    }
-
-    /**
-     * Reads a control extra as an int. {@code content call --extra port:i:0}
-     * arrives as an Integer; a string is accepted as well so a caller that writes
-     * {@code --extra port:s:0} is not silently given the default.
-     */
-    private static int intExtra(Bundle extras, String name, int fallback) {
-        Object value = extras.get(name);
-        if (value instanceof Number) {
-            return ((Number) value).intValue();
-        }
-        if (value instanceof String) {
-            try {
-                return Integer.parseInt(((String) value).trim());
-            } catch (NumberFormatException ignored) {
-                // Fall through: a string that is not a number is the default.
-            }
-        }
-        return fallback;
-    }
-
-    private static boolean booleanExtra(Bundle extras, String name, boolean fallback) {
-        Object value = extras.get(name);
-        if (value instanceof Boolean) {
-            return (Boolean) value;
-        }
-        if (value instanceof Number) {
-            return ((Number) value).intValue() != 0;
-        }
-        if (value instanceof String) {
-            return Boolean.parseBoolean(((String) value).trim());
-        }
-        return fallback;
-    }
-
-    private static Bundle reply(int code, String data) {
-        Bundle out = new Bundle();
-        out.putInt("code", code);
-        out.putString("data", data);
-        return out;
-    }
-
-    static final class Result {
-        final int code;
-        final String data;
-
-        Result(int code, String data) {
-            this.code = code;
-            this.data = data;
-        }
-    }
-
-    // A provider must implement these; the surface is call(), not a table.
-    @Override
-    public Cursor query(Uri uri, String[] projection, String selection,
-                        String[] selectionArgs, String sortOrder) {
-        return null;
-    }
-
-    @Override
-    public String getType(Uri uri) {
-        return null;
-    }
-
-    @Override
-    public Uri insert(Uri uri, ContentValues values) {
-        return null;
-    }
-
-    @Override
-    public int delete(Uri uri, String selection, String[] selectionArgs) {
-        return 0;
-    }
-
-    @Override
-    public int update(Uri uri, ContentValues values, String selection, String[] selectionArgs) {
-        return 0;
     }
 }

@@ -25,3 +25,9 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "screenstream"
+
+// The control surface is a standalone AAR: a provider base, its ordered
+// broadcast twin, the reply/uid/token rules and the `content call` parser. The
+// root library depends on it, and wireless-adb-keeper can too without pulling
+// in the screen capture.
+include(":android-control-surface")

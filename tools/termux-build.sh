@@ -72,6 +72,8 @@ if [ -n "${PREFIX:-}" ] && [ -x "$aapt2" ]; then
 fi
 
 echo "== termux smoke build: $("$gradle" --version | sed -n 's/^Gradle //p' | head -1) ==" >&2
-"$gradle" "${args[@]}" checkBuildEnv checkManifests :assembleRelease "$@"
+"$gradle" "${args[@]}" checkBuildEnv checkManifests :assembleRelease \
+    :android-control-surface:assembleRelease :android-control-surface:test "$@"
 
-echo "built $(find build/outputs/aar -name '*.aar' -print -quit)"
+echo "built $(find build/outputs/aar android-control-surface/build/outputs/aar \
+    -name '*.aar' -print 2>/dev/null | sort | tr '\n' ' ')"

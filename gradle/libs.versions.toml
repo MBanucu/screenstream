@@ -16,9 +16,16 @@ buildTools = "35.0.0"
 # The Java language level for javac and for the library's API.
 java = "17"
 
-# The AAR, APK and client version. -Pversion=... still overrides it for a
-# publication or a release job.
+# The AAR, APK, control-surface AAR and client version. -Pversion=... still
+# overrides it for a publication or a release job.
 projectVersion = "0.2.0"
+
+# Device-free JVM tests: the gate, the reply text, the token and the parser are
+# plain java.*, so the control-surface module tests run without a phone.
+junit = "4.13.2"
 
 [plugins]
 android-library = { id = "com.android.library", version.ref = "agp" }
+
+[libraries]
+junit = { module = "junit:junit", version.ref = "junit" }

@@ -65,15 +65,19 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
       - name: gradle
-        run: ./gradlew --no-daemon checkBuildEnv :assembleRelease
+        run: ./gradlew --no-daemon checkBuildEnv :assembleRelease :android-control-surface:assembleRelease :android-control-surface:test
 
       # Both artifacts must contain the same API, however each build got there.
+      # (The control surface is compared too; the screenstream POM names it.)
       - name: the two builds agree
         run: |
           set -euo pipefail
-          unzip -p build/outputs/aar/screenstream-release.aar classes.jar > /tmp/gradle.jar
-          python3 - <<'EOF'
+          version=$(python3 tools/versions.py projectVersion)
+          unzip -p build/outputs/aar/screenstream-release.aar classes.jar > /tmp/gradle-screenstream.jar
+          unzip -p android-control-surface/build/outputs/aar/android-control-surface-release.aar classes.jar > /tmp/gradle-control.jar
+          python3 - "$version" <<'EOF'
           import subprocess, sys, tempfile, zipfile, os
+          version = sys.argv[1]
           def api(jar):
               out = []
               with tempfile.TemporaryDirectory() as d:
@@ -89,14 +93,20 @@ jobs:
                       out.append(subprocess.run(['javap', '-p', '-classpath', d, name],
                                                 capture_output=True, text=True).stdout)
               return ''.join(out)
-          a = api('/tmp/gradle.jar')
-          b = api(os.path.join('out', [f for f in os.listdir('out') if f.endswith('.jar')
-                                       and 'sources' not in f and 'javadoc' not in f][0]))
-          if not a.strip():
-              sys.exit('javap produced nothing for the Gradle AAR')
-          if a != b:
-              sys.exit('the two builds expose different APIs')
-          print('same API:', a.count('public'), 'public declarations')
+          pairs = [
+              ('screenstream', '/tmp/gradle-screenstream.jar',
+               os.path.join('out', 'screenstream-%s.jar' % version)),
+              ('android-control-surface', '/tmp/gradle-control.jar',
+               os.path.join('out', 'android-control-surface-%s.jar' % version)),
+          ]
+          for name, gradle, scripted in pairs:
+              a = api(gradle)
+              b = api(scripted)
+              if not a.strip():
+                  sys.exit('javap produced nothing for the Gradle %s AAR' % name)
+              if a != b:
+                  sys.exit('the two builds expose different APIs for %s' % name)
+              print(name, 'same API:', a.count('public'), 'public declarations')
           EOF
 
   # The build is developed on Termux, so CI has a path for a self-hosted phone

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- This library declares no components of its own: ControlProvider and
+     ControlReceiver are base classes, so the app that uses them declares the
+     provider/receiver and the action it answers. Gradle merges this (empty)
+     manifest into a consumer; build.sh packages it into the AAR. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" />
