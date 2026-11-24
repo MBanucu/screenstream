@@ -43,8 +43,10 @@ jobs:
         run: |
           sdk="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
           manager=$(command -v sdkmanager || echo "$sdk/cmdline-tools/latest/bin/sdkmanager")
+          api=$(python3 tools/versions.py compileSdk)
+          build_tools=$(python3 tools/versions.py buildTools)
           yes | "$manager" --licenses >/dev/null 2>&1 || true
-          "$manager" "platforms;android-35" "build-tools;35.0.0" >/dev/null
+          "$manager" "platforms;android-$api" "build-tools;$build_tools" >/dev/null
           echo "ANDROID_HOME=$sdk" >>"$GITHUB_ENV"
 
       - name: Check the release secrets are present

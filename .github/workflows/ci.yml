@@ -20,6 +20,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The wrapper JAR and its distribution URL are the build's trust anchor:
+      # this checks the JAR against Gradle's published checksums, and
+      # gradle-wrapper.properties pins distributionSha256Sum as well.
+      - uses: gradle/actions/wrapper-validation@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -48,8 +53,10 @@ jobs:
         run: |
           sdk="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
           manager=$(command -v sdkmanager || echo "$sdk/cmdline-tools/latest/bin/sdkmanager")
+          api=$(python3 tools/versions.py compileSdk)
+          build_tools=$(python3 tools/versions.py buildTools)
           yes | "$manager" --licenses >/dev/null 2>&1 || true
-          "$manager" "platforms;android-35" "build-tools;35.0.0" >/dev/null
+          "$manager" "platforms;android-$api" "build-tools;$build_tools" >/dev/null
           echo "ANDROID_HOME=$sdk" >>"$GITHUB_ENV"
 
       # The scripted build, unchanged from the phone: javac, d8, zip, javadoc.
@@ -58,7 +65,7 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
       - name: gradle
-        run: ./gradlew --no-daemon :assembleRelease
+        run: ./gradlew --no-daemon checkBuildEnv :assembleRelease
 
       # Both artifacts must contain the same API, however each build got there.
       - name: the two builds agree
@@ -91,3 +98,17 @@ jobs:
               sys.exit('the two builds expose different APIs')
           print('same API:', a.count('public'), 'public declarations')
           EOF
+
+  # The build is developed on Termux, so CI has a path for a self-hosted phone
+  # runner without making every PR wait for one. Set the repository variable
+  # TERMUX_RUNNER=true (Settings -> Variables) once such a runner is registered
+  # with the labels self-hosted and termux; until then this job is skipped, and
+  # tools/termux-build.sh is the documented on-device smoke build.
+  termux:
+    name: termux smoke build
+    if: vars.TERMUX_RUNNER == 'true'
+    runs-on: [self-hosted, termux]
+    steps:
+      - uses: actions/checkout@v4
+      - name: check the environment and assembleRelease
+        run: tools/termux-build.sh

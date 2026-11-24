@@ -3,6 +3,8 @@
 // without an explicit @aar), JitPack, and an IDE import. build.sh stays the build
 // that runs on the phone without a download; this one is for a machine with time
 // and network, and it builds the same sources and the same manifest.
+import org.gradle.api.initialization.resolve.RepositoriesMode
+
 pluginManagement {
     repositories {
         google()
@@ -12,6 +14,10 @@ pluginManagement {
 }
 
 dependencyResolutionManagement {
+    // Every artifact comes from the repositories here. A project-level
+    // repositories {} block would split resolution across two places and is
+    // refused instead of silently adding another source.
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {
         google()
         mavenCentral()
