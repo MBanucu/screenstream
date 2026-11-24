@@ -1,4 +1,11 @@
-#!/usr/bin/env bash
+#!/bin/sh
+# shellcheck shell=bash
+# /bin/sh exists on both Termux and Linux; re-exec bash because the script
+# below uses bash arrays.  Termux has no /usr/bin/env, so a portable shebang
+# cannot be '#!/usr/bin/env bash'.
+if [ -z "${BASH_VERSION:-}" ]; then
+    exec bash "$0" "$@"
+fi
 # Smoke-builds the library on Termux, the environment this project is developed
 # on rather than the ubuntu runner in .github/workflows/ci.yml.
 #
@@ -34,7 +41,14 @@ if [ -z "${ANDROID_HOME:-}" ] && [ -z "${ANDROID_SDK_ROOT:-}" ] \
     echo "using ANDROID_HOME=$ANDROID_HOME (no env or local.properties)" >&2
 fi
 
-args=(--console=plain --warning-mode all --configuration-cache --build-cache)
+args=(--warning-mode all --configuration-cache --build-cache)
+has_console=0
+for arg in "$@"; do
+    case $arg in
+        --console | --console=*) has_console=1 ;;
+    esac
+done
+[ "$has_console" = 1 ] || args=(--console=plain "${args[@]}")
 if [ "${OFFLINE:-1}" = 1 ]; then
     args+=(--offline)
 fi
