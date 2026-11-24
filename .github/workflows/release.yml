@@ -20,6 +20,17 @@ on:
         description: 'Version to publish, for example 0.2.0'
         required: true
         type: string
+      # A release event always publishes both. `target` lets a manual run
+      # publish only the client, for example to backfill a PyPI project.
+      target:
+        description: 'Which artifacts to publish'
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - maven
+          - pypi
 
 permissions:
   contents: read
@@ -27,6 +38,7 @@ permissions:
 jobs:
   maven-central:
     name: publish to Maven Central
+    if: ${{ github.event_name == 'release' || inputs.target == 'all' || inputs.target == 'maven' }}
     runs-on: ubuntu-24.04
     steps:
       # The artifact is built from the tag being released, not from main.
@@ -131,6 +143,7 @@ jobs:
   # see README, "Publishing: PyPI, for the client".
   pypi:
     name: publish the client to PyPI
+    if: ${{ github.event_name == 'release' || inputs.target == 'all' || inputs.target == 'pypi' }}
     runs-on: ubuntu-24.04
     environment: pypi
     permissions:
