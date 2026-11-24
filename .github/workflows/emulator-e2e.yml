@@ -1,0 +1,107 @@
+name: emulator-e2e
+
+# Post-merge proof that a merged change can still bring up a capture, deliver a
+# frame and finalise an MP4 on a real Android runtime. This is a protocol and
+# lifecycle gate, not a MediaTek encoder or panel test: the AVD is x86_64
+# google_apis with a software AVC encoder and SwiftShader, so the vendor encoder,
+# the phone's 120 Hz panel and OEM power behaviour still need the self-hosted
+# device. See "The emulator capture gate" in the README.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: emulator-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  capture:
+    name: API 35 capture smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # The MP4 is checked with ffprobe, not a screenshot; install it so the
+      # finalisation assertion is part of the gate on every hosted run.
+      - name: ffprobe
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg
+          ffprobe -version | head -1
+
+      # The KVM rule the emulator action needs on GitHub's Linux runners.
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      # build.sh needs the project's build-tools on PATH. The emulator action
+      # installs its own SDK pieces later, but not necessarily this version.
+      - name: Android SDK for build.sh
+        run: |
+          sdk="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          manager=$(command -v sdkmanager || echo "$sdk/cmdline-tools/latest/bin/sdkmanager")
+          api=$(python3 tools/versions.py compileSdk)
+          build_tools=$(python3 tools/versions.py buildTools)
+          yes | "$manager" --licenses >/dev/null 2>&1 || true
+          "$manager" "platforms;android-$api" "build-tools;$build_tools" >/dev/null
+          echo "ANDROID_HOME=$sdk" >>"$GITHUB_ENV"
+          echo "PATH=$sdk/build-tools/$build_tools:$PATH" >>"$GITHUB_ENV"
+
+      # The smoke test imports the distribution a consumer installs, not a
+      # second copy of the wire parser.
+      - name: Install the Python client
+        run: python3 -m pip install --no-deps -e client
+
+      # fresh API 35 AVD, a display profile set before boot (so the test never
+      # calls `wm size` under a live capture), and a 20-minute job cap.
+      - name: Boot the AVD and run the capture gate
+        uses: reactivecircus/android-emulator-runner@v2
+        env:
+          AVD_NAME: screenstream-api35
+          DISPLAY_WIDTH: '1440'
+          DISPLAY_HEIGHT: '3200'
+          DISPLAY_DENSITY: '560'
+          CAPTURE_SCALE: '2'
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_2
+          cores: 2
+          ram-size: 3072M
+          avd-name: screenstream-api35
+          emulator-boot-timeout: 600
+          disable-animations: true
+          emulator-options: >-
+            -no-window -no-snapshot -gpu swiftshader_indirect -noaudio
+            -no-boot-anim -camera-back none -camera-front none
+          pre-emulator-launch-script: bash ci/emulator-display-profile.sh
+          script: bash ci/emulator-e2e.sh
+
+      # A missing emulator, a refused grant or a zero-frame run must fail, and
+      # what it failed on has to be inspectable: replies, frame log and MP4.
+      - name: Upload the capture artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: emulator-e2e-${{ github.run_id }}
+          path: out/emulator/
+          if-no-files-found: warn
+          retention-days: 7

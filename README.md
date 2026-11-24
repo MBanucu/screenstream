@@ -324,6 +324,51 @@ encoder=                 the encoder component in use, e.g. c2.mtk.avc.encoder
                          for the phone's hardware one, or - when none is running
 ```
 
+### The emulator capture gate in CI
+
+`.github/workflows/emulator-e2e.yml` runs `ci/emulator-e2e.sh` on every push to
+`main` and on `workflow_dispatch`. It is a post-merge check that a merged change
+still brings up a capture on a real Android runtime:
+
+- A fresh API 35 `google_apis` `x86_64` AVD on `ubuntu-24.04`, with the KVM udev
+  rule, and a **20-minute** job cap. The screen is set to **1440x3200 at 560
+  dpi** (411x914 dp) by `ci/emulator-display-profile.sh` as the action's
+  `pre-emulator-launch-script`, so the display exists before boot; the test never
+  calls `wm size` under a live capture.
+- The script refuses to pass without an `emulator-*` serial in the `device`
+  state, builds the APK with `build.sh apk`, and installs it. A missing emulator
+  or a physical phone is a failed run, not a skipped one.
+- It takes the documented headless consent route: `appops set <package>
+  PROJECT_MEDIA allow`, then verifies `grant=yes` through the provider, and
+  revokes it in an `EXIT` trap. If API 35 ignores the op, `start` answers
+  `waiting_for_grant` and the run fails; it does not wait for a person to click.
+- `start --port 0 --scale 2` is the **synchronous control reply** from #1: it
+  returns only after the first composited frame, with `state=streaming` and the
+  port it bound. The script reads that port; it never polls the state file or
+  guesses a port.
+- The installed Python client connects through `adb forward`, the screen is
+  changed (`am start` Settings after the client attached), and the run asserts at
+  least one frame, a protocol-2 header whose `stride * height` matches the bytes
+  delivered, the expected 720x1600 scaled frame size, strictly increasing frame
+  numbers and non-decreasing `timestampNs`.
+- `recording` finalises the MP4, `stop` ends the capture, the file is pulled, and
+  its non-zero size is checked. The job installs `ffprobe`, which must read a
+  video track with at least one frame at the capture size; a local run without
+  ffprobe only checks the size. The assertion is the container and the frame,
+  not a byte-for-byte H.264 stream.
+- Control replies, the frame log, `adb devices` and the MP4 are written under
+  `out/emulator/` and uploaded when the job fails.
+
+This is a **protocol and lifecycle gate**, not a MediaTek encoder or panel test.
+The AVD uses a software AVC encoder and SwiftShader; it proves the provider
+reply, the port announcement, the first frame after a change, the device
+timestamps and the MP4 finalisation. It does **not** prove
+`c2.mtk.avc.encoder`, the phone's 1440x3200 120 Hz panel, OEM power behaviour, or
+output quality; the self-hosted phone remains the check for those. The same
+boundary is pinned without a device by `test/test_emulator_e2e.py`: the
+fail-closed preflight, the control-reply fixtures and the frame/timestamp
+assertions.
+
 ## Recording to a file
 
 **Record** (or `--ez record true`) writes an H.264 MP4 next to the stream. It is
@@ -568,7 +613,10 @@ any language a test harness is written in.
   `screenrecord`'s metadata track and with `dumpsys`, so a check that passes on
   frame *n* can name the picture of frame *n*. `test/test_device_wire.py` is an
   optional, clearly marked device check of one frame's size and timestamp; it is
-  skipped unless `SCREENSTREAM_DEVICE=1` and is not run by CI.
+  skipped unless `SCREENSTREAM_DEVICE=1` and is not run by the hosted workflow.
+  The post-merge `.github/workflows/emulator-e2e.yml` gate is a different check:
+  it uses a fresh API 35 AVD and asserts the control reply, the first frame, the
+  timestamp order and the MP4 finalisation, not the phone's encoder.
 
 ## Two builds
 
