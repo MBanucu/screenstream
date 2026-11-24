@@ -338,11 +338,16 @@ still brings up a capture on a real Android runtime:
 - The script refuses to pass without an `emulator-*` serial in the `device`
   state, builds the APK with `build.sh apk`, and installs it. A missing emulator
   or a physical phone is a failed run, not a skipped one.
-- It takes the documented headless consent route: `appops set --uid <package>
-  PROJECT_MEDIA allow`, verifies the UID mode with `appops get`, then verifies
-  `grant=yes` through the provider, and revokes it in an `EXIT` trap. If the
-  platform ignores the op, `start` answers `waiting_for_grant` and the run fails;
-  it does not wait for a person to click.
+- It first takes the documented headless consent route: `appops set --uid
+  <package> PROJECT_MEDIA allow`, verifies the UID mode with `appops get`, then
+  verifies `grant=yes` through the provider, and revokes it in an `EXIT` trap.
+- API 35 still shows the projection dialog after that UID grant. The gate starts
+  the capture in the background, finds the dialog's positive button in a
+  `uiautomator dump`, and taps it with `adb shell input tap`; it does not use
+  fixed coordinates and does not wait for a person. `start` must then prove
+  `state=streaming` with a bound port, the expected frame size and at least one
+  composited frame. A dump without the button, a dismissed dialog or a
+  `waiting_for_grant` reply fails the run.
 - `start --port 0 --scale 2` is the **synchronous control reply** from #1: it
   returns only after the first composited frame, with `state=streaming` and the
   port it bound. The script reads that port; it never polls the state file or

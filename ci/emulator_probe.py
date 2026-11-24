@@ -18,6 +18,7 @@ the command-line part is a thin wrapper for the shell script. Run
 from __future__ import annotations
 
 import argparse
+import re
 import subprocess
 import sys
 import time
@@ -278,6 +279,39 @@ def _size(text: str | None) -> tuple[int | None, int | None]:
         raise ProbeError("expected WIDTHxHEIGHT, not %r" % text)
 
 
+_DIALOG_BOUNDS = re.compile(r"\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]")
+_DIALOG_NODE = re.compile(r"<node\b([^>]*)>")
+_DIALOG_ATTR = re.compile(r'([\w:-]+)="([^"]*)"')
+_DIALOG_ACCEPT_TEXT = ("start now", "start recording", "start sharing")
+
+
+def dialog_tap(xml: str) -> tuple[int, int]:
+    """Returns the centre of the positive button in a uiautomator dump.
+
+    API 35 can show the projection consent dialog even when the UID app-op is
+    allowed. The hosted gate accepts that same system button with ``input tap``;
+    finding it by resource id (or the button's text) keeps the coordinates out
+    of the workflow. A dump with no positive button is a failure, not a guess.
+    """
+    fallback = None
+    for node in _DIALOG_NODE.finditer(xml):
+        attrs = dict(_DIALOG_ATTR.findall(node.group(1)))
+        bounds = _DIALOG_BOUNDS.search(attrs.get("bounds", ""))
+        if not bounds:
+            continue
+        x1, y1, x2, y2 = (int(value) for value in bounds.groups())
+        if x2 <= x1 or y2 <= y1:
+            continue
+        text = attrs.get("text", "").strip().lower()
+        if attrs.get("resource-id") == "android:id/button1":
+            return (x1 + x2) // 2, (y1 + y2) // 2
+        if any(candidate in text for candidate in _DIALOG_ACCEPT_TEXT):
+            fallback = ((x1 + x2) // 2, (y1 + y2) // 2)
+    if fallback is not None:
+        return fallback
+    raise ProbeError("no projection-dialog accept button in the uiautomator dump")
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -307,6 +341,10 @@ def main(argv=None) -> int:
     frames.add_argument("--limit", type=int, default=5)
     frames.add_argument("--expect-size", help="WIDTHxHEIGHT after scale")
 
+    dialog = sub.add_parser("dialog", help="print the projection-dialog tap point")
+    dialog.add_argument("--xml", required=True,
+                        help="uiautomator dump path, or - for stdin")
+
     args = parser.parse_args(argv)
     try:
         if args.command == "grant":
@@ -334,6 +372,11 @@ def main(argv=None) -> int:
             print("frames=%d numbers=%d..%d timestamps_ns=%d..%d"
                   % (len(found), found[0].number, found[-1].number,
                      found[0].timestamp_ns, found[-1].timestamp_ns))
+        elif args.command == "dialog":
+            xml = (sys.stdin.read() if args.xml == "-"
+                   else Path(args.xml).read_text(encoding="utf-8"))
+            x, y = dialog_tap(xml)
+            print("%d %d" % (x, y))
     except (ProbeError, client.ScreenstreamError, OSError) as failed:
         print("emulator probe: %s" % failed, file=sys.stderr)
         return 1

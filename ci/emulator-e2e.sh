@@ -37,8 +37,10 @@ DISPLAY_HEIGHT="${DISPLAY_HEIGHT:-3200}"
 DISPLAY_DENSITY="${DISPLAY_DENSITY:-560}"
 FIRST_FRAME_TIMEOUT_MS="${FIRST_FRAME_TIMEOUT_MS:-60000}"
 FRAME_TIMEOUT="${FRAME_TIMEOUT:-30}"
+DIALOG_TIMEOUT="${DIALOG_TIMEOUT:-45}"
 SERIAL=""
 CAPTURE_ATTEMPTED=0
+START_PID=0
 
 die() {
     echo "emulator e2e: $*" >&2
@@ -72,6 +74,10 @@ fi
 cleanup() {
     local status=$?
     set +e
+    if [ "$START_PID" -gt 0 ] && kill -0 "$START_PID" 2>/dev/null; then
+        kill "$START_PID" 2>/dev/null
+        wait "$START_PID" 2>/dev/null
+    fi
     if [ -n "$SERIAL" ]; then
         adb -s "$SERIAL" forward --remove "tcp:$HOST_PORT" >/dev/null 2>&1
         if [ "$CAPTURE_ATTEMPTED" -eq 1 ]; then
@@ -102,6 +108,7 @@ valid_positive "$SCALE" || die "CAPTURE_SCALE must be a positive integer, not '$
 valid_positive "$DISPLAY_WIDTH" || die "DISPLAY_WIDTH must be a positive integer"
 valid_positive "$DISPLAY_HEIGHT" || die "DISPLAY_HEIGHT must be a positive integer"
 valid_positive "$DISPLAY_DENSITY" || die "DISPLAY_DENSITY must be a positive integer"
+valid_positive "$DIALOG_TIMEOUT" || die "DIALOG_TIMEOUT must be a positive integer"
 
 {
     printf 'api='
@@ -187,10 +194,60 @@ GRANT_ROUTE="$(python3 "$ROOT/ci/emulator_probe.py" grant \
 log "grant route $GRANT_ROUTE"
 
 # start is synchronous: it answers streaming and the port only after the first
-# composited frame, so there is no state-file poll and no guessed port.
+# composited frame, so there is no state-file poll and no guessed port. On API 35
+# the projection dialog is still shown even when the UID app-op is allowed, so
+# the call runs in the background while the same system button a person would
+# press is found in a uiautomator dump and tapped. The provider still has to
+# prove the grant and the first frame; this does not turn a failed start green.
+log "starting the capture and accepting the projection dialog if the platform asks"
 CAPTURE_ATTEMPTED=1
 control_call start --extra port:i:0 --extra encoded_port:i:0 \
-    --extra scale:i:"$SCALE" --extra timeout_ms:i:"$FIRST_FRAME_TIMEOUT_MS"
+    --extra scale:i:"$SCALE" --extra timeout_ms:i:"$FIRST_FRAME_TIMEOUT_MS" \
+    >"$OUT/control-start.log" 2>&1 &
+START_PID=$!
+
+dialog_tapped=0
+dialog_deadline=$((SECONDS + DIALOG_TIMEOUT))
+while [ "$SECONDS" -lt "$dialog_deadline" ]; do
+    adb -s "$SERIAL" shell uiautomator dump /sdcard/window.xml \
+        >/dev/null 2>&1 || true
+    if dialog_xml="$(adb -s "$SERIAL" exec-out cat /sdcard/window.xml \
+            2>/dev/null)" \
+        && dialog_point="$(printf '%s' "$dialog_xml" \
+            | python3 "$ROOT/ci/emulator_probe.py" dialog --xml - 2>/dev/null)"; then
+        read -r dialog_x dialog_y <<<"$dialog_point"
+        if adb -s "$SERIAL" shell input tap "$dialog_x" "$dialog_y" \
+                >"$OUT/dialog-tap.txt" 2>&1; then
+            printf 'tapped %s %s\n' "$dialog_x" "$dialog_y" >>"$OUT/dialog-tap.txt"
+            dialog_tapped=1
+            log "accepted the projection dialog at $dialog_x,$dialog_y"
+        fi
+        break
+    fi
+    if ! kill -0 "$START_PID" 2>/dev/null; then
+        # The platform skipped the dialog (the app-op was honoured); the
+        # background start has already produced its reply.
+        break
+    fi
+    sleep 1
+done
+
+if kill -0 "$START_PID" 2>/dev/null && [ "$dialog_tapped" -eq 0 ]; then
+    kill "$START_PID" 2>/dev/null || true
+    wait "$START_PID" 2>/dev/null || true
+    START_PID=0
+    cat "$OUT/control-start.log" >&2
+    die "the projection dialog did not appear and start did not finish within ${DIALOG_TIMEOUT}s"
+fi
+if ! wait "$START_PID"; then
+    START_PID=0
+    cat "$OUT/control-start.log" >&2
+    die "content call start failed before it produced a reply"
+fi
+START_PID=0
+if [ "$dialog_tapped" -eq 0 ]; then
+    log "start completed without a projection dialog"
+fi
 PORT="$(python3 "$ROOT/ci/emulator_probe.py" start \
     --reply "$OUT/control-start.txt" --expect-size "$FRAME_SIZE")" \
     || die "start did not prove a streaming capture; see control-start.txt"
