@@ -8,7 +8,8 @@ name: release
 #
 # Secrets (repository settings -> Secrets and variables -> Actions):
 #   SIGNING_KEY            the armored private key, as gpg --export-secret-keys prints it
-#   SIGNING_PASSWORD       that key's passphrase
+#   SIGNING_PASSWORD       that key's passphrase; optional, and absent for an
+#                          unprotected key such as screenstream's
 #   MAVEN_CENTRAL_USERNAME portal user token username
 #   MAVEN_CENTRAL_PASSWORD portal user token password
 on:
@@ -68,8 +69,11 @@ jobs:
           MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
           MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
         run: |
+          # SIGNING_PASSWORD is optional: screenstream's key has no passphrase, and
+          # a GitHub secret cannot hold an empty value, so it is simply unset.
+          # publish.sh then signs without the loopback passphrase flags.
           missing=()
-          for name in SIGNING_KEY SIGNING_PASSWORD MAVEN_CENTRAL_USERNAME MAVEN_CENTRAL_PASSWORD; do
+          for name in SIGNING_KEY MAVEN_CENTRAL_USERNAME MAVEN_CENTRAL_PASSWORD; do
             [ -n "${!name:-}" ] || missing+=("$name")
           done
           if [ ${#missing[@]} -gt 0 ]; then
