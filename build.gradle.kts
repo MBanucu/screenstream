@@ -65,6 +65,16 @@ android {
 group = "io.github.mbanucu"
 version = providers.gradleProperty("version").getOrElse(libs.versions.projectVersion.get())
 
+dependencies {
+    // The control surface's provider base, receiver twin, reply rules and
+    // `content call` parser. Published as its own AAR, so a consumer that only
+    // wants the provider does not pull in the capture. `api`, not
+    // `implementation`: screenstream's ControlProvider extends the library's, so
+    // the type is part of this AAR's public surface and belongs on a consumer's
+    // compile classpath too.
+    api(project(":android-control-surface"))
+}
+
 @DisableCachingByDefault(because = "Reads the machine's build environment")
 abstract class CheckBuildEnv : DefaultTask() {
     @get:Input

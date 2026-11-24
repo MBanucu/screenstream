@@ -49,6 +49,19 @@ version existed.
 The distribution and the AAR share the version in `pyproject.toml`; it must
 equal `build.gradle.kts` and `build.sh`, and the test suite checks that.
 
+## The control surface
+
+`screenstream_client.control` is the shared parser for the `content call` wire
+format: `parse_call` for a command, `parse_result` for the
+`Result: Bundle[{code=..., data=...}]` reply, `parse_fields` for the
+`key=value` body and `parse_extra` for `name:type:value`. Its
+`SCHEMA_VERSION` must equal the Java library's
+`ControlContract.SCHEMA_VERSION`; `test/test_control.py` reads both and the
+shared fixture, so the Java and Python grammars cannot drift silently.
+`client/control.py` is the adb command-line wrapper over it.
+
+The contract is `docs/control-surface.md` in the repository.
+
 ## License
 
 GPL-3.0-or-later, as the rest of screenstream.

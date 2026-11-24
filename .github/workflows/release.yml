@@ -91,21 +91,34 @@ jobs:
           # Tags are written v0.2.0 as often as 0.2.0; the artifact version is not.
           version=${VERSION#v}
           export VERSION="$version"
-          deployment=$(bash publish.sh --upload | sed -n 's/^deployment: //p')
-          [ -n "$deployment" ] || { echo "::error::no deployment id in the upload output"; exit 1; }
-          echo "deployment $deployment"
-          for attempt in $(seq 1 40); do
-            state=$(bash publish.sh --status "$deployment" | python3 -c \
-              'import json,sys; print(json.load(sys.stdin)["deploymentState"])')
-            echo "attempt $attempt: $state"
-            case "$state" in
-              VALIDATED) bash publish.sh --publish "$deployment"; break ;;
-              FAILED) echo "::error::validation failed"; exit 1 ;;
-            esac
-            sleep 15
-          done
-          echo "### screenstream $version" >>"$GITHUB_STEP_SUMMARY"
-          echo "Deployment \`$deployment\` submitted to Maven Central." >>"$GITHUB_STEP_SUMMARY"
+
+          publish_one() {
+            artifact=$1
+            deployment=$(ARTIFACT="$artifact" bash publish.sh --upload \
+              | sed -n 's/^deployment: //p')
+            [ -n "$deployment" ] || { echo "::error::no deployment id for $artifact"; exit 1; }
+            echo "$artifact deployment $deployment"
+            for attempt in $(seq 1 40); do
+              state=$(bash publish.sh --status "$deployment" | python3 -c \
+                'import json,sys; print(json.load(sys.stdin)["deploymentState"])')
+              echo "$artifact attempt $attempt: $state"
+              case "$state" in
+                VALIDATED) bash publish.sh --publish "$deployment"; return 0 ;;
+                FAILED) echo "::error::$artifact validation failed"; exit 1 ;;
+              esac
+              sleep 15
+            done
+            echo "::error::$artifact did not validate in time"; exit 1
+          }
+
+          # The control surface is screenstream's dependency: publish it first,
+          # so a screenstream POM never names a version Central does not have.
+          publish_one android-control-surface
+          publish_one screenstream
+          {
+            echo "### screenstream $version"
+            echo "Both artifacts were submitted to Maven Central."
+          } >>"$GITHUB_STEP_SUMMARY"
 
   # The Python client is the same release as the AAR: one tag, one version.
   #

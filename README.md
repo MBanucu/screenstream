@@ -241,6 +241,12 @@ clicker from an accessibility service remains a fallback, not a requirement. The
 intents and the state file are unchanged and remain the debug record; the provider
 is the documented path for automation.
 
+The provider's gate, reply format, escaping and `content call` parser are not
+screenstream's own any more: they live in the `android-control-surface` library
+described below, and `docs/control-surface.md` is the frozen contract (schema 1).
+Existing `content call --method ...` output is unchanged, including the keys,
+the `code` values and the one-line escaping.
+
 ### Recording headlessly on a fresh device
 
 One copy-pasteable run: install, opt into the app-op for this run, start only
@@ -432,6 +438,7 @@ the activity all come with the dependency.
 
 ```bash
 bash build.sh    # out/screenstream-0.2.0.aar (+ .jar, sources, javadoc, .pom)
+                 # and the dependency, out/android-control-surface-0.2.0.*
 ```
 
 ```kotlin
@@ -483,6 +490,61 @@ display — a VFR stream cannot say that again, so a consumer that starts on a s
 screen should sample the screen itself once and label what it saw with
 `frameNumber()`.
 
+## The control surface, as a library
+
+The provider base and its ordered-broadcast twin are a separate AAR, so another
+app gets the same gate and reply format without copying screenstream's provider:
+
+```kotlin
+dependencies {
+    implementation("io.github.mbanucu:android-control-surface:0.2.0")
+    // or, from a checkout, build it with: bash build.sh control-surface
+}
+```
+
+```java
+import io.github.mbanucu.control.*;
+
+public final class MyProvider extends io.github.mbanucu.control.ControlProvider {
+    @Override protected String usage() { return "status, enable"; }
+
+    @Override protected Reply handle(String method, Args extras) {
+        if ("status".equals(method)) return Reply.keyValue(0, "state", "ready");
+        if ("enable".equals(method)) return Reply.keyValue(0, "result", "on");
+        return null;                 // 400 unknown method, with the usage above
+    }
+}
+
+public final class MyReceiver extends io.github.mbanucu.control.ControlReceiver {
+    @Override protected String action() { return "com.example.CONTROL"; }
+    @Override protected Reply handle(String method, Args extras) {
+        return sameDispatchAsTheProvider(method, extras);
+    }
+    @Override protected ControlToken token() {
+        return ControlToken.atFile(new File(getFilesDir(), "control.token"));
+    }
+}
+```
+
+The base supplies `code`/`data`, `Reply.keyValue` and `Reply.oneLine`, the
+root/system/shell/self allowlist, the optional token (minted only by the
+shell-only `token` method, verified in constant time for an app uid) and the
+`content call` extras parser. `Args.intValue`/`booleanValue` accept the typed
+extra the platform sends and a string a script wrote by hand.
+
+`ControlToken`, `UidGate`, `Reply` and `ContentCall` are plain `java.*`, so the
+device-free tests for them run on a build machine:
+
+```bash
+gradle --offline :android-control-surface:test
+```
+
+`docs/control-surface.md` is the contract: the codes, the `key=value` grammar,
+the escaping, the extras letters and the schema version. The Python client's
+`screenstream_client.control` implements the same grammar and is tested against
+the same fixture file. Nothing from this module is on Maven Central yet; the
+first publication is a follow-up, and the coordinate above is the intended one.
+
 ## From a test framework
 
 The socket is the language-agnostic edge, and for most frameworks it is all they
@@ -517,7 +579,8 @@ which is the AGP line that runs on Gradle 9.6+ (8.x dies on a Gradle internal AP
 that was removed there):
 
 ```bash
-gradle :assembleRelease          # build/outputs/aar/screenstream-release.aar
+gradle :assembleRelease :android-control-surface:assembleRelease
+gradle :android-control-surface:test   # device-free JVM tests for the surface
 gradle checkBuildEnv             # JDK, SDK, compileSdk and aapt2, in one message
 tools/termux-build.sh            # the same build, with the checks and caches
 ```
@@ -525,28 +588,42 @@ tools/termux-build.sh            # the same build, with the checks and caches
 Versions and SDK levels live in `gradle/libs.versions.toml`; `build.sh`,
 `publish.sh` and the CI workflows read the same file through
 `tools/versions.py`, so AGP 9.5.2, compileSdk 35 and the project version are not
-copied between scripts.
+copied between scripts. The control surface is `:android-control-surface`, a
+Gradle project and a separate AAR; screenstream depends on it, which is why the
+root POM names it.
 
-The two produce the same library, checked rather than assumed: the AAR holds the
-same 12 classes and 179 `javap` signature lines, with the manifest's permissions,
-activity and service intact. The class bytes differ because the two invoke javac
-differently, and the Gradle AAR carries `aar-metadata.properties`.
+The two produce the same libraries, checked rather than assumed: for
+screenstream and for the control surface, the Gradle AAR and the `build.sh` jar
+expose the same `javap` API, with the manifests' permissions, activity and
+service intact. The class bytes differ because the two invoke javac differently,
+and the Gradle AARs carry `aar-metadata.properties` and no embedded dependency.
+
+`build.sh` builds the control surface first, then screenstream against it, and
+writes both sets of artifacts:
+
+```bash
+bash build.sh                 # out/screenstream-* and out/android-control-surface-*
+bash build.sh control-surface # only the AAR/friends, for a consumer's prototype
+bash build.sh apk             # both source trees in the app's dex
+```
 
 `./gradlew` is checked in, so a machine with nothing but a JDK can build it: the
 wrapper downloads Gradle 9.9.2 itself, and `distributionSha256Sum` in
 `gradle-wrapper.properties` pins the archive. CI validates the wrapper JAR as
 well. There is also CI — `.github/workflows/ci.yml` runs the host-side tests
-(control, wire format and fMP4), installs the client and checks both console
-scripts, builds both ways on ubuntu and then fails if the two artifacts expose
-different APIs (compared with `javap`, not by trusting that they compile). It has
-an opt-in self-hosted Termux job (repository variable `TERMUX_RUNNER=true`) and
+(control, wire format and fMP4) and the device-free control-surface JVM tests,
+installs the client and checks both console scripts, builds both ways on ubuntu
+and then fails if either artifact exposes a different API between the two builds
+(compared with `javap`, not by trusting that they compile). It has an opt-in
+self-hosted Termux job (repository variable `TERMUX_RUNNER=true`) and
 `tools/termux-build.sh` for the phone itself. `.github/workflows/release.yml`
-publishes a release. Its Maven job runs `publish.sh` itself rather than a second
-publishing path, given the four secrets `SIGNING_KEY`, `SIGNING_PASSWORD`,
-`MAVEN_CENTRAL_USERNAME`, `MAVEN_CENTRAL_PASSWORD` — which do not exist in this
-repository yet, so the first release run stops at the step that checks for them.
-Its PyPI job publishes the client with trusted publishing, described under
-"Publishing: PyPI" above.
+publishes a release. Its Maven job runs `publish.sh` itself, once for
+`android-control-surface` and then for `screenstream` (the dependency has to
+exist first), rather than a second publishing path, given the four secrets
+`SIGNING_KEY`, `SIGNING_PASSWORD`, `MAVEN_CENTRAL_USERNAME`,
+`MAVEN_CENTRAL_PASSWORD` — which do not exist in this repository yet, so the
+first release run stops at the step that checks for them. Its PyPI job publishes
+the client with trusted publishing, described under "Publishing: PyPI" above.
 
 What Gradle adds is what a publication wants rather than what a build needs:
 module metadata (`.module`, which is how a Gradle consumer resolves the AAR without
@@ -570,12 +647,16 @@ package). The app is not a dependency and does not go there.
 
 Neither Gradle nor Maven is needed for this, and neither is installed here: the
 Central Portal accepts a zip laid out as a Maven repository, so `publish.sh`
-builds, signs and assembles it. One version is 40 files — the AAR, POM, sources
-jar and javadoc jar, each with a `.asc` and four checksums — 163 KB per version.
+builds, signs and assembles it. One version is 40 files per artifact — the AAR,
+POM, sources jar and javadoc jar, each with a `.asc` and four checksums — 163 KB
+per version for screenstream. The control surface is published the same way, as
+its own deployment, and has to go first because the screenstream POM names it.
 
 ```bash
 bash publish.sh            # build, sign, checksum: out/screenstream-<version>-bundle.zip
 bash publish.sh --upload   # ... and upload it, with the portal's user token
+ARTIFACT=android-control-surface bash publish.sh            # the dependency, same steps
+ARTIFACT=android-control-surface bash publish.sh --upload   # ... and upload it first
 GRADLE_PUBLISH=1 bash publish.sh --upload   # same, with Gradle's artifacts (.module)
 bash publish.sh --status <deploymentId>   # VALIDATED, PUBLISHING, PUBLISHED
 bash publish.sh --publish <deploymentId>  # release a validated USER_MANAGED one
@@ -587,6 +668,9 @@ the Gradle layout instead, so the bundle carries the `.module` as a fifth artifa
 `GRADLE_PUBLISH=1 VERSION=0.2.0 bash publish.sh --upload`, which runs
 `publishAllPublicationsToOutRepoRepository` and signs what Gradle wrote. Both
 releases verify against the key below; 0.2.0 does not change the API.
+`android-control-surface` has **not** been published yet: the module builds, its
+tests run, `publish.sh` can assemble and sign it, and this change deliberately
+stops there. `publishToMavenLocal` is enough to try a consumer against it.
 
 The token is read from `CENTRAL_USERNAME`/`CENTRAL_PASSWORD` if they are set, and
 otherwise from the `central` server in `~/.m2/settings.xml` — the same place a
@@ -732,3 +816,21 @@ time. Three ways to answer it, in decreasing order of honesty:
 - No audio, no file output: this is a source, and a recorder is a different tool.
 - `scale=2` is the compositor's, not a downscale afterwards, so it is cheap; there is
   nothing between full size and half size.
+
+## Follow-ups for the control surface
+
+The library module is extracted and screenstream is built on it, but issue #6 is
+not finished:
+
+- **Publish a version.** `io.github.mbanucu:android-control-surface` builds,
+  tests and signs locally; no version of it is on Maven Central yet, so the
+  coordinate in the snippet above is the intended one and the screenstream POM
+  that names it cannot resolve from Central until it exists.
+- **Migrate wireless-adb-keeper.** Its `ControlProvider`, `ControlReceiver` and
+  `ControlToken` are the same code; move it onto the AAR and delete the copies.
+- **One client.** Point `keeperctl.sh` at the shared Python client
+  (`client/screenstream_client`) instead of its own `sed`/`awk` reply parser,
+  and have adb-harness drive screenstream through the same client.
+- **Token for screenstream itself.** The base supports one; screenstream
+  deliberately configures none, so its existing replies and callers are
+  unchanged. Turning it on is a separate decision.

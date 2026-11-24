@@ -1,17 +1,24 @@
 #!/usr/bin/env bash
-# Publishes the library to Maven Central, through the Central Portal's bundle
+# Publishes a library to Maven Central, through the Central Portal's bundle
 # upload. There is no Gradle or Maven here (see build.sh), and the portal does
 # not need one: it accepts a zip laid out as a Maven repository, with signatures
 # and checksums beside the artifacts.
 #
-#   bash publish.sh                     # build, sign, checksum, zip; print how to upload
+#   bash publish.sh                     # build, sign, checksum, zip screenstream
+#   ARTIFACT=android-control-surface bash publish.sh
+#                                       # ... and the control-surface library
 #   bash publish.sh --upload            # ... and upload it
 #   bash publish.sh --status <id>       # how did deployment <id> go?
 #   bash publish.sh --publish <id>      # release a validated, USER_MANAGED deployment
 #   VERSION=0.2.0 PGP_KEY=0xABCD bash publish.sh
 #   (VERSION defaults to gradle/libs.versions.toml's projectVersion.)
 #
+# The control surface is screenstream's dependency, so on Central it has to be
+# published first: a screenstream POM that names a version Central does not have
+# is not resolvable by a consumer.
+#
 # Environment:
+#   ARTIFACT           screenstream (default) or android-control-surface
 #   PGP_KEY            key to sign with (default: gpg's default secret key)
 #   PGP_PASSPHRASE     the key's passphrase, for a key that has one; without it
 #                      gpg tries to ask, which no piped shell can answer
@@ -24,7 +31,7 @@
 #                      the .module file
 #
 # What Central checks, and where it comes from:
-#   .aar, .pom, -sources.jar, -javadoc.jar   build.sh
+#   .aar, .pom, -sources.jar, -javadoc.jar   build.sh (or Gradle with GRADLE_PUBLISH)
 #   .asc for every file above                gpg; the public key must be on a
 #                                            keyserver Central can reach
 #   .md5 .sha1 .sha256 .sha512 for each      sha*sum, over the file and its .asc
@@ -38,7 +45,12 @@ set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 version=${VERSION:-$(python3 "$here/tools/versions.py" projectVersion)}
 group=io.github.mbanucu
-artifact_id=screenstream
+artifact_id=${ARTIFACT:-screenstream}
+case "$artifact_id" in
+    screenstream) build_mode=library ;;
+    android-control-surface) build_mode=control-surface ;;
+    *) echo "ARTIFACT=$artifact_id is not screenstream or android-control-surface" >&2; exit 2 ;;
+esac
 portal=${PORTAL:-https://central.sonatype.com}
 out=$here/out
 bundle=$out/$artifact_id-$version-bundle.zip
@@ -116,22 +128,31 @@ for tool in gpg md5sum sha1sum sha256sum sha512sum python3; do
 done
 
 # --- the artifacts -------------------------------------------------------------
-# build.sh writes four files. Gradle's repository layout writes five, the fifth
-# being the .module a Gradle consumer reads instead of inferring the artifact from
-# the POM's <packaging>. GRADLE_PUBLISH=1 takes the Gradle route.
+# build.sh writes five files per artifact. Gradle's repository layout writes six,
+# the sixth being the .module a Gradle consumer reads instead of inferring the
+# artifact from the POM's <packaging>. GRADLE_PUBLISH=1 takes the Gradle route,
+# and publishing screenstream there also publishes its control-surface
+# dependency into the same repository layout.
 files_in=()
 if [ -n "${GRADLE_PUBLISH:-}" ]; then
     echo "== $artifact_id $version: gradle =="
+    tasks=(":android-control-surface:publishAllPublicationsToOutRepoRepository")
+    if [ "$artifact_id" = screenstream ]; then
+        tasks+=(":publishAllPublicationsToOutRepoRepository")
+    fi
     bash "$here/gradlew" --no-daemon --console=plain >/dev/null \
-        publishAllPublicationsToOutRepoRepository -Pversion="$version"
-    src=$here/build/m2repo/${group//.//}/$artifact_id/$version
+        "${tasks[@]}" -Pversion="$version"
+    src=$here/${artifact_id}/build/m2repo/${group//.//}/$artifact_id/$version
+    if [ "$artifact_id" = screenstream ]; then
+        src=$here/build/m2repo/${group//.//}/$artifact_id/$version
+    fi
     for name in "$artifact_id-$version.pom" "$artifact_id-$version.aar" \
             "$artifact_id-$version.module" \
             "$artifact_id-$version-sources.jar" "$artifact_id-$version-javadoc.jar"; do
         files_in+=("$src/$name")
     done
 else
-    bash "$here/build.sh"
+    bash "$here/build.sh" "$build_mode"
     for name in "$artifact_id-$version.pom" "$artifact_id-$version.aar" \
             "$artifact_id-$version-sources.jar" "$artifact_id-$version-javadoc.jar"; do
         files_in+=("$out/$name")

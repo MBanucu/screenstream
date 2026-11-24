@@ -10,10 +10,11 @@
 
 The provider replies with a Bundle whose ``code`` is 0 for a successful call and
 400 for one that could not be done, and whose ``data`` is one ``key=value`` line
-per field. ``content call`` prints that Bundle; :func:`parse_result` keeps the
-parsing in one place so a test suite can reuse it. ``start`` is synchronous: it
-returns ``state=streaming`` and the bound port after the first composited frame,
-or ``code=400`` and ``state=failed`` with a ``why`` line. A projection that was
+per field. ``content call`` prints that Bundle; the parsing lives in
+:mod:`screenstream_client.control` so the Java library and this client are
+tested against the same fixture. ``start`` is synchronous: it returns
+``state=streaming`` and the bound port after the first composited frame, or
+``code=400`` and ``state=failed`` with a ``why`` line. A projection that was
 never granted is ``state=waiting_for_grant`` with ``reason=dialog`` and the
 ``command`` that grants it; ``grant=yes|no|unknown`` is on every status and start
 reply, so a harness can fail before recording a black video.
@@ -23,10 +24,21 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import subprocess
 import sys
 from typing import Iterable, Sequence
+
+from screenstream_client.control import (  # noqa: F401  (re-exported for callers)
+    SCHEMA_VERSION,
+    Call,
+    ControlError,
+    Extra,
+    Reply,
+    parse_call,
+    parse_extra,
+    parse_fields,
+    parse_result,
+)
 
 AUTHORITY = "content://io.github.mbanucu.screenstream.control"
 METHODS = ("status", "grant", "start", "stop", "record", "recording")
@@ -34,52 +46,6 @@ METHODS = ("status", "grant", "start", "stop", "record", "recording")
 # grant=yes means a projection would start without a dialog; no means it asks;
 # unknown means the platform could not be asked. Absent is unknown too.
 _GRANTED = {"yes": True, "no": False, "unknown": None}
-
-# `content call` prints `Result: Bundle[{code=0, data=...}]`; the data's newlines
-# are literal, so the match has to span them.
-_RESULT = re.compile(r"Result: Bundle\[\{code=(-?\d+), data=(.*)\}\]\s*$", re.S)
-
-
-class ControlError(Exception):
-    """The command failed before it produced a provider reply."""
-
-
-class Reply:
-    def __init__(self, code: int, data: str):
-        self.code = code
-        self.data = data
-
-    @property
-    def fields(self) -> dict[str, str]:
-        return parse_fields(self.data)
-
-    def __getitem__(self, key: str) -> str:
-        return self.fields[key]
-
-    def __repr__(self) -> str:
-        return "Reply(code=%r, data=%r)" % (self.code, self.data)
-
-
-def parse_fields(data: str) -> dict[str, str]:
-    """Splits ``key=value`` lines; a value may itself contain ``=`` or ``:``."""
-    fields: dict[str, str] = {}
-    for line in data.splitlines():
-        if "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        key = key.strip()
-        if key:
-            # The last occurrence wins, like a shell reading the file.
-            fields[key] = value.strip()
-    return fields
-
-
-def parse_result(text: str) -> Reply:
-    """Parses the `content call` output, tolerating lines before the Result."""
-    match = _RESULT.search(text)
-    if not match:
-        raise ControlError("no Result: Bundle in %r" % text.strip()[:500])
-    return Reply(int(match.group(1)), match.group(2))
 
 
 def granted(reply: Reply) -> bool | None:

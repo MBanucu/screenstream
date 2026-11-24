@@ -14,6 +14,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "client"))
 
 import control  # noqa: E402
 
+ROOT = Path(__file__).resolve().parents[1]
+FIXTURES = (ROOT / "android-control-surface" / "src" / "test" / "resources"
+            / "control-call-fixtures.properties")
+CONTRACT_JAVA = (ROOT / "android-control-surface" / "src" / "main" / "java"
+                 / "io" / "github" / "mbanucu" / "control" / "ControlContract.java")
+
 
 STATUS = """state=streaming
 port=43127
@@ -200,6 +206,79 @@ class CommandTests(unittest.TestCase):
 
     def test_no_extras_means_defaults_on_the_device(self):
         self.assertEqual([], control.start_extras(None, None, None, None))
+
+
+class CallGrammarTests(unittest.TestCase):
+    """The extras grammar, mirrored by the Java library and shared by fixture."""
+
+    def test_extra_is_name_type_value(self):
+        extra = control.parse_extra("why:s:could not bind 127.0.0.1:7100")
+        self.assertEqual("why", extra.name)
+        self.assertEqual("s", extra.type)
+        self.assertEqual("could not bind 127.0.0.1:7100", extra.value)
+        self.assertEqual("could not bind 127.0.0.1:7100", extra.typed())
+
+    def test_extra_types(self):
+        self.assertEqual(0, control.parse_extra("port:i:0").typed())
+        self.assertEqual(0, control.parse_extra("offset:l:0").typed())
+        self.assertEqual(2.5, control.parse_extra("scale:f:2.5").typed())
+        self.assertEqual(2.5, control.parse_extra("scale:d:2.5").typed())
+        self.assertIs(True, control.parse_extra("record:z:true").typed())
+        self.assertEqual("a", control.parse_extra("a:s:a").typed())
+        self.assertIsNone(control.parse_extra("port:i:nope").typed())
+
+    def test_malformed_extras_are_refused(self):
+        for text in ("port", "port:0", ":i:0", "port:x:0"):
+            with self.assertRaises(ValueError):
+                control.parse_extra(text)
+
+    def test_short_command(self):
+        call = control.parse_call(
+            "content call --uri content://x --method start --extra port:i:0")
+        self.assertEqual("content://x", call.uri)
+        self.assertEqual("start", call.method)
+        self.assertEqual(1, len(call.extras))
+        self.assertEqual(0, call.args()["port"])
+
+    def test_full_adb_command(self):
+        call = control.parse_call(
+            "adb -s emulator-5554 shell content call --uri content://x "
+            "--method status")
+        self.assertEqual("status", call.method)
+        self.assertEqual((), call.extras)
+
+    def test_a_method_is_required(self):
+        with self.assertRaises(ValueError):
+            control.parse_call("content call --uri content://x")
+
+
+class SharedContractTests(unittest.TestCase):
+    def test_the_schema_version_matches_the_java_constant(self):
+        import re
+        source = CONTRACT_JAVA.read_text(encoding="utf-8")
+        match = re.search(r"SCHEMA_VERSION\s*=\s*(\d+)", source)
+        self.assertIsNotNone(match, "no SCHEMA_VERSION in ControlContract.java")
+        self.assertEqual(int(match.group(1)), control.SCHEMA_VERSION)
+
+    def test_the_shared_fixture_parses_in_python_too(self):
+        self.assertTrue(FIXTURES.is_file(), "missing %s" % FIXTURES)
+        checked = 0
+        for line in FIXTURES.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            key, _, value = line.partition("=")
+            if key == "content-surface":
+                self.assertEqual(str(control.SCHEMA_VERSION), value)
+                continue
+            command, uri, method, extras = value.split("|")
+            call = control.parse_call(command)
+            self.assertEqual(uri, call.uri, key)
+            self.assertEqual(method, call.method, key)
+            self.assertEqual(extras, ",".join(str(extra) for extra in call.extras), key)
+            checked += 1
+        self.assertGreaterEqual(checked, 4)
+
 
 
 if __name__ == "__main__":
