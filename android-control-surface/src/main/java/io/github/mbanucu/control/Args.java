@@ -97,7 +97,13 @@ public final class Args {
             return ((Number) value).intValue() != 0;
         }
         if (value instanceof String) {
-            return Boolean.parseBoolean(((String) value).trim());
+            String text = ((String) value).trim();
+            if ("true".equalsIgnoreCase(text)) {
+                return true;
+            }
+            if ("false".equalsIgnoreCase(text)) {
+                return false;
+            }
         }
         return fallback;
     }
