@@ -7,9 +7,11 @@
 #   bash publish.sh                     # build, sign, checksum, zip screenstream
 #   ARTIFACT=android-control-surface bash publish.sh
 #                                       # ... and the control-surface library
-#   bash publish.sh --upload            # ... and upload it
+#   bash publish.sh --upload            # ... and upload it; prints "deployment: <id>",
+#                                       # or "deployment: already-published"
 #   bash publish.sh --status <id>       # how did deployment <id> go?
 #   bash publish.sh --publish <id>      # release a validated, USER_MANAGED deployment
+#   bash publish.sh --wait <id>         # ... and block until it is PUBLISHED
 #   VERSION=0.2.0 PGP_KEY=0xABCD bash publish.sh
 #   (VERSION defaults to gradle/libs.versions.toml's projectVersion.)
 #
@@ -22,10 +24,15 @@
 #   PGP_KEY            key to sign with (default: gpg's default secret key)
 #   PGP_PASSPHRASE     the key's passphrase, for a key that has one; without it
 #                      gpg tries to ask, which no piped shell can answer
-#   CENTRAL_USERNAME   portal user token username   \  only for --upload and
-#   CENTRAL_PASSWORD   portal user token password   /  --status; if unset, they
-#                      are read from ~/.m2/settings.xml, server id "central"
+#   CENTRAL_USERNAME   portal user token username   \  for every action that
+#   CENTRAL_PASSWORD   portal user token password   /  talks to the portal; if
+#                      unset, they are read from ~/.m2/settings.xml, server
+#                      id "central"
 #   SETTINGS           a different settings.xml to read that server from
+#   CENTRAL_REPO       published repository checked before an upload, so a re-run
+#                      reports what is already out instead of failing on it
+#   WAIT_TIMEOUT       seconds --wait gives the portal (default 900)
+#   WAIT_INTERVAL      seconds between --wait polls (default 15)
 #   GRADLE_PUBLISH     take the artifacts from the Gradle build's repository layout
 #                      instead of build.sh, which is the only route that includes
 #                      the .module file
@@ -52,6 +59,9 @@ case "$artifact_id" in
     *) echo "ARTIFACT=$artifact_id is not screenstream or android-control-surface" >&2; exit 2 ;;
 esac
 portal=${PORTAL:-https://central.sonatype.com}
+# Where a published version is readable without a token. A version is permanent,
+# so this is also how a re-run knows there is nothing left to do.
+central_repo=${CENTRAL_REPO:-https://repo1.maven.org/maven2}
 out=$here/out
 bundle=$out/$artifact_id-$version-bundle.zip
 tree=$out/bundle
@@ -86,7 +96,7 @@ EOF
     echo "token: $settings, server 'central'" >&2
 }
 
-if [ "$action" = --status ] || [ "$action" = --publish ]; then
+if [ "$action" = --status ] || [ "$action" = --publish ] || [ "$action" = --wait ]; then
     id=${2:?deployment id}
     read_credentials || {
         echo "no token: set CENTRAL_USERNAME/CENTRAL_PASSWORD, or add a server" >&2
@@ -94,20 +104,22 @@ if [ "$action" = --status ] || [ "$action" = --publish ]; then
         exit 1
     }
     auth=$(printf '%s:%s' "$CENTRAL_USERNAME" "$CENTRAL_PASSWORD" | base64 | tr -d '\n')
-    if [ "$action" = --publish ]; then
-        # A USER_MANAGED deployment that reached VALIDATED waits for exactly this:
-        # a POST to the deployment itself. 204 means it is now PUBLISHING.
+
+    # A USER_MANAGED deployment that reached VALIDATED waits for exactly this:
+    # a POST to the deployment itself. 204 means it is now PUBLISHING.
+    release() {
         curl --fail --silent --show-error -X POST -H "Authorization: Bearer $auth" \
             "$portal/api/v1/publisher/deployment/$id"
-        echo "deployment $id is publishing"
-        exit 0
-    fi
+    }
+
     # /publisher/status answers 500 for deployments it has, so read the list:
     # the deployment's own GET is for the portal's UI, not for this question.
-    listed=$(curl --fail --silent --show-error -H "Authorization: Bearer $auth" \
-        "$portal/api/v1/publisher/deployments")
     # The program comes from -c, not stdin: stdin is the JSON being parsed.
-    printf '%s' "$listed" | python3 -c "
+    status() {
+        local listed
+        listed=$(curl --fail --silent --show-error -H "Authorization: Bearer $auth" \
+            "$portal/api/v1/publisher/deployments")
+        printf '%s' "$listed" | python3 -c "
 import json, sys
 want = sys.argv[1]
 data = json.load(sys.stdin)
@@ -120,7 +132,109 @@ for item in items:
 else:
     sys.exit('no deployment ' + want)
 " "$id"
-    exit 0
+    }
+
+    if [ "$action" = --publish ]; then
+        release
+        echo "deployment $id is publishing"
+        exit 0
+    fi
+    if [ "$action" = --status ]; then
+        status
+        exit 0
+    fi
+
+    # --wait: a version is only usable once its deployment reads PUBLISHED, and a
+    # re-run whose version already is PUBLISHED must report that instead of
+    # spinning until the timeout. So every state has an answer: release a
+    # VALIDATED deployment (the same POST --publish makes), keep polling the
+    # transient ones, and stop on the two that are final.
+    started=$SECONDS
+    wait_for=${WAIT_TIMEOUT:-900}
+    delay=${WAIT_INTERVAL:-15}
+    while :; do
+        state=$(status | python3 -c \
+            'import json, sys; print(json.load(sys.stdin)["deploymentState"])')
+        case "$state" in
+            PUBLISHED)
+                echo "deployment $id is PUBLISHED"
+                exit 0
+                ;;
+            FAILED)
+                echo "deployment $id FAILED validation; nothing was published" >&2
+                exit 1
+                ;;
+            VALIDATED)
+                echo "deployment $id is VALIDATED; releasing it"
+                release
+                ;;
+            *)
+                echo "deployment $id: $state"
+                ;;
+        esac
+        if [ $((SECONDS - started)) -ge "$wait_for" ]; then
+            echo "deployment $id is still $state after ${wait_for}s" >&2
+            echo "check it with: bash $0 --status $id" >&2
+            exit 1
+        fi
+        sleep "$delay"
+    done
+fi
+
+# --- a version is permanent ----------------------------------------------------
+# A re-run must not upload a bundle Central already has: the portal rejects the
+# duplicate and the run fails on a release that is already live, which is the
+# likely retry after the other half of a release failed.
+#
+# The portal's deployment list answers immediately and needs the token; the
+# published repository answers without one but mirrors a publish minutes late.
+# So ask the portal first and fall back to the repository, before spending a
+# build either way.
+if [ "$action" = --upload ]; then
+    deployment_name=$artifact_id-$version
+    existing_id=""
+    existing_state=""
+    if read_credentials >/dev/null 2>&1; then
+        token=$(printf '%s:%s' "$CENTRAL_USERNAME" "$CENTRAL_PASSWORD" | base64 | tr -d '\n')
+        found=$(curl --fail --silent --show-error \
+            -H "Authorization: Bearer $token" \
+            "$portal/api/v1/publisher/deployments" | python3 -c '
+import json, sys
+want = sys.argv[1]
+data = json.load(sys.stdin)
+items = data if isinstance(data, list) else data.get("deployments") or []
+for item in items:
+    if item.get("deploymentName") == want:
+        print(item.get("deploymentId"), item.get("deploymentState"))
+        break
+' "$deployment_name" || true)
+        existing_id=${found%% *}
+        existing_state=${found#* }
+    fi
+    case "$existing_state" in
+        PUBLISHED|PUBLISHING)
+            echo "== $artifact_id $version: $existing_state as deployment $existing_id =="
+            echo "deployment: already-published"
+            exit 0
+            ;;
+        VALIDATED)
+            # Uploaded and validated by an earlier run that never released it:
+            # hand the deployment back so --wait can finish the job.
+            echo "== $artifact_id $version: VALIDATED as deployment $existing_id, not uploading again =="
+            echo "deployment: $existing_id"
+            exit 0
+            ;;
+    esac
+    if [ -z "$existing_state" ]; then
+        code=$(curl --silent --output /dev/null --max-time 20 \
+            --write-out '%{http_code}' \
+            "$central_repo/${group//.//}/$artifact_id/$version/$artifact_id-$version.pom" || true)
+        if [ "$code" = 200 ]; then
+            echo "== $artifact_id $version: already published, nothing to upload =="
+            echo "deployment: already-published"
+            exit 0
+        fi
+    fi
 fi
 
 for tool in gpg md5sum sha1sum sha256sum sha512sum python3; do

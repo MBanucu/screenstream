@@ -128,30 +128,36 @@ jobs:
 
           publish_one() {
             artifact=$1
+            # --upload prints the deployment it created, or `already-published`
+            # when Central has that version: a re-run must not fail on the half
+            # of the release that already succeeded.
             deployment=$(ARTIFACT="$artifact" bash publish.sh --upload \
               | sed -n 's/^deployment: //p')
-            [ -n "$deployment" ] || { echo "::error::no deployment id for $artifact"; exit 1; }
+            case "$deployment" in
+              already-published)
+                echo "$artifact $version is already published; nothing to upload"
+                return 0
+                ;;
+              '')
+                echo "::error::no deployment id for $artifact"
+                exit 1
+                ;;
+            esac
             echo "$artifact deployment $deployment"
-            for attempt in $(seq 1 40); do
-              state=$(bash publish.sh --status "$deployment" | python3 -c \
-                'import json,sys; print(json.load(sys.stdin)["deploymentState"])')
-              echo "$artifact attempt $attempt: $state"
-              case "$state" in
-                VALIDATED) bash publish.sh --publish "$deployment"; return 0 ;;
-                FAILED) echo "::error::$artifact validation failed"; exit 1 ;;
-              esac
-              sleep 15
-            done
-            echo "::error::$artifact did not validate in time"; exit 1
+            # --wait releases a VALIDATED deployment and returns only once it is
+            # PUBLISHED, so the ordering below is publication order, not just
+            # submission order.
+            bash publish.sh --wait "$deployment"
           }
 
-          # The control surface is screenstream's dependency: publish it first,
-          # so a screenstream POM never names a version Central does not have.
+          # The control surface is screenstream's dependency: publish it first and
+          # wait for it, so a screenstream POM never names a version Central does
+          # not have yet.
           publish_one android-control-surface
           publish_one screenstream
           {
             echo "### screenstream $version"
-            echo "Both artifacts were submitted to Maven Central."
+            echo "Both artifacts are PUBLISHED on Maven Central, or already were."
           } >>"$GITHUB_STEP_SUMMARY"
 
   # The Python client is the same release as the AAR: one tag, one version.

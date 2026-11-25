@@ -707,7 +707,9 @@ Central Portal accepts a zip laid out as a Maven repository, so `publish.sh`
 builds, signs and assembles it. One version is 40 files per artifact — the AAR,
 POM, sources jar and javadoc jar, each with a `.asc` and four checksums — 163 KB
 per version for screenstream. The control surface is published the same way, as
-its own deployment, and has to go first because the screenstream POM names it.
+its own deployment, and has to go first because the screenstream POM names it —
+the release workflow waits for it to read `PUBLISHED` before uploading
+screenstream.
 
 ```bash
 bash publish.sh            # build, sign, checksum: out/screenstream-<version>-bundle.zip
@@ -717,7 +719,15 @@ ARTIFACT=android-control-surface bash publish.sh --upload   # ... and upload it 
 GRADLE_PUBLISH=1 bash publish.sh --upload   # same, with Gradle's artifacts (.module)
 bash publish.sh --status <deploymentId>   # VALIDATED, PUBLISHING, PUBLISHED
 bash publish.sh --publish <deploymentId>  # release a validated USER_MANAGED one
+bash publish.sh --wait <deploymentId>     # release it when validated, block until PUBLISHED
 ```
+
+`--wait` is what makes "the dependency goes first" publication order rather than
+submission order: it releases a `VALIDATED` deployment, returns only once it reads
+`PUBLISHED`, and reports an already-`PUBLISHED` one instead of waiting out its
+timeout. `--upload` does the same for the version itself — if Central already has
+it, the run prints `deployment: already-published` and uploads nothing, so
+re-running a release whose Maven half succeeded (say to retry PyPI) is safe.
 
 0.1.0 went out on 2026-11-22 that way (deployment `607463de`) from `build.sh`, and
 Central had it about four minutes later. 0.2.0 is the same library published from
