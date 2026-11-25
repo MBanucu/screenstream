@@ -265,3 +265,7 @@ smoke version for a real release.
 | `SDK location not found` although `ANDROID_HOME` is exported | the Gradle daemon did not inherit it; use `tools/termux-build.sh`, add `local.properties`, or pass `--no-daemon` |
 | configuration cache "cannot be reused" after editing a build file | expected; the next run stores a new entry |
 | `checkManifests` fails | regenerate `gradle/AndroidManifest.xml` from the canonical manifest as shown above |
+
+## See also
+
+[README](../README.md) · [client](client.md) · [app](app.md) · [library](library.md) · [control surface](control-surface.md) · [release](release.md) · [Termux build](termux-build.md) · [limits](limits.md)

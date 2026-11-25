@@ -124,3 +124,7 @@ built. The client waits for Maven because a PyPI filename can never be replaced:
 a failed AAR release must not burn a client version that has nothing to install
 against. The Maven side is in [library.md](library.md), and the order of a whole
 release is in [release.md](release.md).
+
+## See also
+
+[README](../README.md) · [client](client.md) · [app](app.md) · [library](library.md) · [control surface](control-surface.md) · [release](release.md) · [Termux build](termux-build.md) · [limits](limits.md)

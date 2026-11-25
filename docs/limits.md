@@ -29,3 +29,7 @@ not finished:
 - **Token for screenstream itself.** The base supports one; screenstream
   deliberately configures none, so its existing replies and callers are
   unchanged. Turning it on is a separate decision.
+
+## See also
+
+[README](../README.md) · [client](client.md) · [app](app.md) · [library](library.md) · [control surface](control-surface.md) · [release](release.md) · [Termux build](termux-build.md) · [limits](limits.md)

@@ -151,3 +151,7 @@ Before the first release, the outside-the-repository setup is: the verified
 token, the PyPI trusted publisher and `pypi` environment, and the three APK
 keystore secrets. [library.md](library.md) covers the first three,
 [client.md](client.md) the PyPI two, and this page the keystore.
+
+## See also
+
+[README](../README.md) · [client](client.md) · [app](app.md) · [library](library.md) · [control surface](control-surface.md) · [release](release.md) · [Termux build](termux-build.md) · [limits](limits.md)

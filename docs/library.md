@@ -236,3 +236,7 @@ metadata (`.module`); this bundle has only the POM, whose `packaging` is `aar` �
 a Gradle consumer may need the explicit `@aar` in the dependency, as shown above.
 And JitPack still builds from a tag with Gradle, which this repository deliberately
 does not use, so JitPack is not a route here.
+
+## See also
+
+[README](../README.md) · [client](client.md) · [app](app.md) · [library](library.md) · [control surface](control-surface.md) · [release](release.md) · [Termux build](termux-build.md) · [limits](limits.md)

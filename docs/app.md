@@ -416,3 +416,7 @@ time. Three ways to answer it, in decreasing order of honesty:
    record blind. A standing grant is fine for a test phone, wrong for anything
    shipped: while it is set, anything able to start the activity can capture the
    screen with no tap and no visible consent.
+
+## See also
+
+[README](../README.md) · [client](client.md) · [app](app.md) · [library](library.md) · [control surface](control-surface.md) · [release](release.md) · [Termux build](termux-build.md) · [limits](limits.md)

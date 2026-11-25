@@ -215,3 +215,7 @@ Python client instead of its own `sed`/`awk` parser.
   their own reply parsers.
 - Decide whether screenstream itself should accept a token; it currently has
   none, and schema 1 keeps its existing replies unchanged.
+
+## See also
+
+[README](../README.md) · [client](client.md) · [app](app.md) · [library](library.md) · [control surface](control-surface.md) · [release](release.md) · [Termux build](termux-build.md) · [limits](limits.md)
