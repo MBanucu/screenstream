@@ -792,10 +792,13 @@ outside this repository and cannot be verified from a checkout:
 - An environment named `pypi` in the repository's settings; the job names it so
   a release can require approval before it uploads.
 
-Until those exist the `pypi` job fails at the upload, after the Maven and APK
-jobs have done their own work. That is deliberate: it is better than storing a
-PyPI token as a secret or uploading from an unverified identity, and the
-version check happens before anything is built.
+Until those exist the `pypi` job fails at the upload, after the Maven job has
+done its own work (the APK is a separate workflow and still runs alongside). That
+is deliberate: it is better than storing a PyPI token as a secret or uploading
+from an unverified identity, and the version check happens before anything is
+built. The client waits for Maven because a PyPI filename can never be replaced:
+a failed AAR release must not burn a client version that has nothing to install
+against.
 
 ## Releasing the app: the APK on GitHub
 
